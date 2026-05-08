@@ -1,8 +1,9 @@
 # syntax=docker/dockerfile:1.7
 FROM golang:1.22-alpine AS builder
 WORKDIR /src
-# Copy workspace + deps
-COPY go.work go.work.sum* ./
+# Copy only what this service needs. go.work is intentionally NOT copied —
+# go build with a workspace requires every listed module to exist, but each
+# Docker image only contains its own service + shared.
 COPY shared/ ./shared/
 COPY services/vcard-api/ ./services/vcard-api/
 ARG VERSION=dev

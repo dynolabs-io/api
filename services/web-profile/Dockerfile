@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1.7
 FROM golang:1.22-alpine AS builder
 WORKDIR /src
-COPY go.work go.work.sum* ./
 COPY shared/ ./shared/
 COPY services/web-profile/ ./services/web-profile/
 ARG VERSION=dev

@@ -1,0 +1,22 @@
+# Go build artifacts
+*.exe
+*.test
+*.out
+/bin/
+/build/
+
+# Local env
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Credentials — NEVER commit
+*.p12
+*.p8
+*.pem
+*.key
+credentials/

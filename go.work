@@ -1,0 +1,10 @@
+go 1.22
+
+use (
+	./services/linkedin-oauth
+	./services/pass-signer
+	./services/photo-cdn
+	./services/vcard-api
+	./services/web-profile
+	./shared
+)

@@ -73,8 +73,10 @@ func main() {
 		_ = tmpl.Execute(w, card)
 	})
 
-	// Direct vCard download for "Save Contact" button.
-	mux.HandleFunc("GET /c/{slug}.vcf", func(w http.ResponseWriter, r *http.Request) {
+	// Direct vCard download for "Save Contact" button. Path uses /save.vcf
+	// suffix because Go 1.22 ServeMux requires wildcards to occupy a full
+	// segment — `/c/{slug}.vcf` is rejected at registration time.
+	mux.HandleFunc("GET /c/{slug}/save.vcf", func(w http.ResponseWriter, r *http.Request) {
 		slug := r.PathValue("slug")
 		if !validSlug(slug) {
 			http.Error(w, "invalid slug", http.StatusBadRequest)
@@ -239,7 +241,7 @@ const profileHTML = `<!doctype html>
       {{ range .Emails }}<div class="row"><span class="icon">EMAIL</span><a href="mailto:{{ . }}">{{ . }}</a></div>{{ end }}
       {{ range .Phones }}<div class="row"><span class="icon">PHONE</span><a href="tel:{{ . }}">{{ . }}</a></div>{{ end }}
       {{ range .Socials }}<div class="row"><span class="icon">{{ .Kind }}</span><a href="{{ .URL }}">{{ .URL }}</a></div>{{ end }}
-      <a class="save" href="/c/{{ .Slug }}.vcf">Save to Contacts</a>
+      <a class="save" href="/c/{{ .Slug }}/save.vcf">Save to Contacts</a>
     </div>
     <p class="ghost">Powered by Dynolabs</p>
   </div>

@@ -1,10 +1,11 @@
 // vcard-api: HTTP service for cards CRUD + slug resolution.
-// CAP-AP design — eventual consistency via NATS replication.
+// CAP-AP design — eventual consistency via NATS replication (Phase 6.5).
 // PostgreSQL is the source-of-truth.
 package main
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"os"
@@ -12,7 +13,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dynolabs-io/api/services/vcard-api/cards"
 	"github.com/dynolabs-io/api/shared/health"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 // version is injected at link time via -ldflags "-X main.version=<sha>".
@@ -24,8 +28,42 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", health.Handler("vcard-api", version))
+
+	// Postgres is wired in if DATABASE_URL is set. If absent (e.g. unit-test
+	// runs of this binary), we skip wiring the cards endpoints and
+	// /readyz reports DB:disabled — the pod still passes liveness.
+	dbURL := getenv("DATABASE_URL", "")
+	var db *sql.DB
+	if dbURL != "" {
+		var err error
+		db, err = openDB(dbURL)
+		if err != nil {
+			slog.Error("postgres open failed", "err", err)
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if err := cards.Migrate(ctx, db); err != nil {
+			cancel()
+			slog.Error("migrate failed", "err", err)
+			os.Exit(1)
+		}
+		cancel()
+		(&cards.Handlers{Repo: cards.NewRepo(db)}).Mount(mux)
+		slog.Info("postgres + cards mounted")
+	} else {
+		slog.Warn("DATABASE_URL not set — running without persistence")
+	}
+
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		// TODO(phase-6): probe Postgres + NATS. v1 stub returns 200.
+		if db != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+			defer cancel()
+			if err := db.PingContext(ctx); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(`{"ready":false,"db":"down"}`))
+				return
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ready":true}`))
 	})
@@ -53,6 +91,25 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutCtx)
+	if db != nil {
+		_ = db.Close()
+	}
+}
+
+func openDB(url string) (*sql.DB, error) {
+	db, err := sql.Open("pgx", url)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	pingCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		return nil, err
+	}
+	return db, nil
 }
 
 func getenv(k, def string) string {

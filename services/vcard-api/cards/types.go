@@ -1,0 +1,29 @@
+// Package cards defines the Card domain type and its persistence + HTTP
+// handlers. Mirrors the mobile-side lib/types.ts so server and client share
+// the same JSON shape.
+package cards
+
+import "time"
+
+type Social struct {
+	Kind string `json:"kind"`
+	URL  string `json:"url"`
+}
+
+type Card struct {
+	ID          string    `json:"id"`
+	Slug        string    `json:"slug"`
+	Label       string    `json:"label"`
+	Name        string    `json:"name"`
+	Title       string    `json:"title,omitempty"`
+	Company     string    `json:"company,omitempty"`
+	Emails      []string  `json:"emails"`
+	Phones      []string  `json:"phones"`
+	Socials     []Social  `json:"socials"`
+	PhotoURL    string    `json:"photoUrl,omitempty"`
+	Template    string    `json:"template"`
+	CustomColor string    `json:"customColor,omitempty"`
+	DeviceID    string    `json:"deviceId,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}

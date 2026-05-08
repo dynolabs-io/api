@@ -26,14 +26,18 @@ func main() {
 
 	stub := os.Getenv("LINKEDIN_CLIENT_ID") == ""
 
+	// Mounted at /oauth on the public ingress.
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", health.Handler("linkedin-oauth", version))
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /oauth/healthz", health.Handler("linkedin-oauth", version))
+	readyz := func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ready":true,"stub":` + map[bool]string{true: "true", false: "false"}[stub] + `}`))
-	})
+	}
+	mux.HandleFunc("GET /readyz", readyz)
+	mux.HandleFunc("GET /oauth/readyz", readyz)
 
-	mux.HandleFunc("GET /authorize", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /oauth/linkedin/authorize", func(w http.ResponseWriter, r *http.Request) {
 		if stub {
 			http.Error(w, `{"error":"stub-mode: LinkedIn OAuth app not yet configured"}`, http.StatusServiceUnavailable)
 			return
@@ -42,7 +46,7 @@ func main() {
 		http.Error(w, `{"error":"not-implemented"}`, http.StatusNotImplemented)
 	})
 
-	mux.HandleFunc("GET /callback", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /oauth/linkedin/callback", func(w http.ResponseWriter, r *http.Request) {
 		if stub {
 			http.Error(w, `{"error":"stub-mode"}`, http.StatusServiceUnavailable)
 			return

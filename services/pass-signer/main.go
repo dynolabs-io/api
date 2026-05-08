@@ -27,12 +27,19 @@ func main() {
 
 	stub := os.Getenv("PASS_SIGNER_STUB") == "1"
 
+	// Service is mounted at /pass on the public ingress. All routes carry that
+	// prefix so requests match without StripPrefix middleware. /pass/healthz +
+	// /pass/readyz are also reachable as bare /healthz + /readyz for kubelet
+	// probes (which hit the pod IP directly, not the ingress).
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", health.Handler("pass-signer", version))
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /pass/healthz", health.Handler("pass-signer", version))
+	readyz := func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ready":true,"stub":` + map[bool]string{true: "true", false: "false"}[stub] + `}`))
-	})
+	}
+	mux.HandleFunc("GET /readyz", readyz)
+	mux.HandleFunc("GET /pass/readyz", readyz)
 
 	mux.HandleFunc("POST /pass/apple", func(w http.ResponseWriter, r *http.Request) {
 		if stub {

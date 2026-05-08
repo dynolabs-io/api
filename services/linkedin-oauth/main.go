@@ -1,17 +1,27 @@
 // linkedin-oauth: handles the OAuth 2.0 Authorization Code flow for LinkedIn.
-// Mobile app calls /oauth/linkedin/authorize → opens browser → LinkedIn auths
-// → /oauth/linkedin/callback → app deep-link with the profile JSON.
 //
-// Stateless across pods would need Redis; v1 uses in-process state map with
-// 10-minute TTL because we run a single replica. Stub-mode kicks in when
-// LINKEDIN_CLIENT_ID is empty so the deployment stays healthy before the
-// operator sets the secret.
+// Flow:
+//   1. POST /oauth/linkedin/authorize?state=&redirect= → returns LinkedIn auth URL
+//   2. App opens that URL via ASWebAuthenticationSession with the app's
+//      private redirect scheme as the close-detector.
+//   3. User auths → LinkedIn → /oauth/linkedin/callback?code= → we exchange
+//      for a token, fetch /v2/userinfo, stash the profile keyed by state,
+//      then redirect the browser to a tiny https URL that just renders
+//      "you can close this".
+//   4. ASWebAuthenticationSession detects the redirect scheme and closes.
+//      App calls /oauth/linkedin/result?state= → returns the profile JSON.
+//
+// We do NOT shove a base64-encoded profile into the redirect URL anymore —
+// that triggered LinkedIn's anti-abuse "check your LinkedIn app" interstitial
+// because the URL was unusually long.
+//
+// State store is in-process (single replica). 10-minute TTL. State is ALSO
+// the result key, but we delete it after first read so a leak doesn't replay.
 
 package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,19 +41,20 @@ import (
 var version = "dev"
 
 type stateEntry struct {
-	redirect string
+	redirect string         // app's deep-link, e.g. dynolabs-vcard://oauth/linkedin
+	profile  *linkedInProfile
 	expires  time.Time
 }
 
 type stateStore struct {
 	mu sync.Mutex
-	m  map[string]stateEntry
+	m  map[string]*stateEntry
 }
 
 func (s *stateStore) put(state, redirect string, ttl time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.m[state] = stateEntry{redirect: redirect, expires: time.Now().Add(ttl)}
+	s.m[state] = &stateEntry{redirect: redirect, expires: time.Now().Add(ttl)}
 	for k, v := range s.m {
 		if time.Now().After(v.expires) {
 			delete(s.m, k)
@@ -51,16 +62,37 @@ func (s *stateStore) put(state, redirect string, ttl time.Duration) {
 	}
 }
 
-func (s *stateStore) take(state string) (string, bool) {
+func (s *stateStore) get(state string) (*stateEntry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	v, ok := s.m[state]
 	if !ok || time.Now().After(v.expires) {
 		delete(s.m, state)
-		return "", false
+		return nil, false
+	}
+	return v, true
+}
+
+func (s *stateStore) setProfile(state string, p *linkedInProfile) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.m[state]
+	if !ok {
+		return false
+	}
+	v.profile = p
+	return true
+}
+
+func (s *stateStore) takeProfile(state string) (*linkedInProfile, string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.m[state]
+	if !ok || v.profile == nil {
+		return nil, "", false
 	}
 	delete(s.m, state)
-	return v.redirect, true
+	return v.profile, v.redirect, true
 }
 
 type linkedInProfile struct {
@@ -81,7 +113,7 @@ func main() {
 	callbackURL := getenv("LINKEDIN_CALLBACK_URL", "https://api.dynolabs.io/oauth/linkedin/callback")
 	stub := clientID == "" || clientSecret == ""
 
-	store := &stateStore{m: map[string]stateEntry{}}
+	store := &stateStore{m: map[string]*stateEntry{}}
 
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", health.Handler("linkedin-oauth", version))
@@ -132,7 +164,7 @@ func main() {
 			http.Error(w, `{"error":"missing state or code"}`, http.StatusBadRequest)
 			return
 		}
-		appRedirect, ok := store.take(state)
+		entry, ok := store.get(state)
 		if !ok {
 			http.Error(w, `{"error":"unknown or expired state"}`, http.StatusBadRequest)
 			return
@@ -144,16 +176,35 @@ func main() {
 			http.Error(w, `{"error":"linkedin exchange failed"}`, http.StatusBadGateway)
 			return
 		}
+		store.setProfile(state, profile)
 
-		// Encode profile as base64 JSON onto the app's deep-link URL.
-		raw, _ := json.Marshal(profile)
-		payload := base64.StdEncoding.EncodeToString(raw)
+		// Redirect to the app's deep-link with NOTHING in the URL except
+		// the state. The app uses state to claim the profile via
+		// /oauth/linkedin/result. URL stays short → no LinkedIn
+		// "check your LinkedIn app" interstitial.
 		sep := "?"
-		if strings.Contains(appRedirect, "?") {
+		if strings.Contains(entry.redirect, "?") {
 			sep = "&"
 		}
-		final := appRedirect + sep + "profile=" + url.QueryEscape(payload)
+		final := entry.redirect + sep + "state=" + url.QueryEscape(state)
 		http.Redirect(w, r, final, http.StatusFound)
+	})
+
+	// App polls this once after the auth session closes. Returns the
+	// profile JSON exactly once per state, then deletes the entry.
+	mux.HandleFunc("GET /oauth/linkedin/result", func(w http.ResponseWriter, r *http.Request) {
+		state := r.URL.Query().Get("state")
+		if state == "" {
+			http.Error(w, `{"error":"state required"}`, http.StatusBadRequest)
+			return
+		}
+		profile, _, ok := store.takeProfile(state)
+		if !ok {
+			http.Error(w, `{"error":"not ready or already claimed"}`, http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(profile)
 	})
 
 	addr := getenv("LISTEN_ADDR", ":8080")

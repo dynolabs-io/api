@@ -231,12 +231,11 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 		back = append(back, pkpass.Field{Key: "profile", Label: "Profile", Value: webBase + "/c/" + c.Slug})
 	}
 
-	// QR encodes the public profile URL — recipient scans, lands on
-	// dynolabs.io/c/<slug>, taps Save to Contacts.
-	qrMsg := webBase + "/c/" + c.Slug
-	if c.Slug == "" {
-		qrMsg = c.Name
-	}
+	// QR encodes the FULL vCard text (BEGIN:VCARD … END:VCARD) — same
+	// payload the app shows. Recipient's default camera reads it offline,
+	// offers Save to Contacts directly. Profile URL added as a URL field
+	// so they can also tap into the web page.
+	qrMsg := buildVCardText(c, webBase)
 
 	return pkpass.Pass{
 		FormatVersion:      1,
@@ -261,6 +260,43 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 			BackFields:      back,
 		},
 	}
+}
+
+// buildVCardText serializes a vCard 3.0 string identical to the mobile
+// client's lib/vcard.ts output, so the wallet pass QR matches the in-app QR.
+func buildVCardText(c *card, webBase string) string {
+	var sb strings.Builder
+	sb.WriteString("BEGIN:VCARD\r\n")
+	sb.WriteString("VERSION:3.0\r\n")
+	sb.WriteString("FN:" + escapeVCard(c.Name) + "\r\n")
+	if c.Title != "" {
+		sb.WriteString("TITLE:" + escapeVCard(c.Title) + "\r\n")
+	}
+	if c.Company != "" {
+		sb.WriteString("ORG:" + escapeVCard(c.Company) + "\r\n")
+	}
+	for _, e := range c.Emails {
+		sb.WriteString("EMAIL;TYPE=INTERNET:" + escapeVCard(e) + "\r\n")
+	}
+	for _, p := range c.Phones {
+		sb.WriteString("TEL;TYPE=CELL:" + escapeVCard(p) + "\r\n")
+	}
+	for _, s := range c.Socials {
+		sb.WriteString("URL:" + escapeVCard(s.URL) + "\r\n")
+	}
+	if c.Slug != "" {
+		sb.WriteString("URL:" + escapeVCard(webBase+"/c/"+c.Slug) + "\r\n")
+	}
+	if c.PhotoURL != "" {
+		sb.WriteString("PHOTO;VALUE=uri:" + c.PhotoURL + "\r\n")
+	}
+	sb.WriteString("END:VCARD\r\n")
+	return sb.String()
+}
+
+func escapeVCard(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `,`, `\,`, `;`, `\;`, "\n", `\n`, "\r", "")
+	return r.Replace(s)
 }
 
 // templateColors returns rgb(...) strings for pass background, foreground, label.

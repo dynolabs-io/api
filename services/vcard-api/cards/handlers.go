@@ -3,6 +3,8 @@ package cards
 import (
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 )
 
@@ -17,6 +19,14 @@ func (h *Handlers) Mount(mux *http.ServeMux) {
 	// Public — recipients hitting the web-profile use this via web-profile's
 	// in-cluster fetch. Also useful for the direct integration tests.
 	mux.HandleFunc("GET /v1/c/{slug}", h.publicBySlug)
+	// Mobile crash log sink — writes to slog so we can read in `kubectl logs`.
+	mux.HandleFunc("POST /v1/crash", h.crash)
+}
+
+func (h *Handlers) crash(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	slog.Error("mobile-crash", "body", string(body), "ua", r.UserAgent())
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handlers) create(w http.ResponseWriter, r *http.Request) {

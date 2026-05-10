@@ -1,62 +1,167 @@
 // pass-signer: signs Apple .pkpass + Google Wallet JWT.
-// Holds the Pass Type ID .p12 (Apple) and service account .json (Google) as
-// mounted secrets. Other services request signed passes over HTTP.
 //
-// Stub-mode: when PASS_SIGNER_STUB=1 the service responds 503 to /pass/* but
-// /healthz still returns 200 — lets us deploy before Apple cert is available.
+// Apple flow:
+//   POST /pass/apple {"cardId":"<uuid>"} → fetches card from vcard-api,
+//   builds pass.json (vCard QR + name + title + company + email/phone in
+//   back fields), signs with Pass Type ID cert + WWDR intermediate, returns
+//   binary .pkpass with Content-Type application/vnd.apple.pkpass.
+//
+// Stub flag PASS_SIGNER_STUB=1 keeps Apple endpoint disabled when cert
+// secret isn't mounted (defensive — secret presence is the real check).
+
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"github.com/dynolabs-io/api/services/pass-signer/pkpass"
 	"github.com/dynolabs-io/api/shared/health"
 )
 
 var version = "dev"
+
+type cardSocial struct {
+	Kind string `json:"kind"`
+	URL  string `json:"url"`
+}
+type card struct {
+	ID       string       `json:"id"`
+	Slug     string       `json:"slug"`
+	Label    string       `json:"label"`
+	Name     string       `json:"name"`
+	Title    string       `json:"title"`
+	Company  string       `json:"company"`
+	Emails   []string     `json:"emails"`
+	Phones   []string     `json:"phones"`
+	Socials  []cardSocial `json:"socials"`
+	PhotoURL string       `json:"photoUrl"`
+	Template string       `json:"template"`
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
 	stub := os.Getenv("PASS_SIGNER_STUB") == "1"
+	apiBase := getenv("VCARD_API_URL", "http://vcard-api.dynolabs.svc")
+	passTypeID := getenv("APPLE_PASS_TYPE_ID", "pass.io.dynolabs.vcard")
+	teamID := getenv("APPLE_TEAM_ID", "77GHJHUGD4")
+	webBase := getenv("WEB_BASE", "https://dynolabs.io")
+	certPath := getenv("APPLE_PASS_CERT_PATH", "/etc/dynolabs-apple-pass/passcert.pem")
+	keyPath := getenv("APPLE_PASS_KEY_PATH", "/etc/dynolabs-apple-pass/passkey.pem")
+	wwdrPath := getenv("APPLE_PASS_WWDR_PATH", "/etc/dynolabs-apple-pass/wwdr.pem")
 
-	// Service is mounted at /pass on the public ingress. All routes carry that
-	// prefix so requests match without StripPrefix middleware. /pass/healthz +
-	// /pass/readyz are also reachable as bare /healthz + /readyz for kubelet
-	// probes (which hit the pod IP directly, not the ingress).
+	var (
+		signer *pkpass.Signer
+		signMu sync.RWMutex
+	)
+	if !stub {
+		certPEM, err1 := os.ReadFile(certPath)
+		keyPEM, err2 := os.ReadFile(keyPath)
+		wwdrPEM, err3 := os.ReadFile(wwdrPath)
+		if err1 == nil && err2 == nil && err3 == nil {
+			s, err := pkpass.LoadSigner(certPEM, keyPEM, wwdrPEM)
+			if err != nil {
+				slog.Error("load signer failed", "err", err)
+				os.Exit(1)
+			}
+			signer = s
+			slog.Info("pass-signer loaded",
+				"subject", signer.PassCert.Subject.CommonName,
+				"wwdr", signer.WWDR.Subject.CommonName)
+		} else {
+			slog.Warn("pass cert files missing — falling back to stub mode",
+				"cert_err", err1, "key_err", err2, "wwdr_err", err3)
+			stub = true
+		}
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("GET /healthz", health.Handler("pass-signer", version))
 	mux.Handle("GET /pass/healthz", health.Handler("pass-signer", version))
 	readyz := func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ready":true,"stub":` + map[bool]string{true: "true", false: "false"}[stub] + `}`))
+		fmt.Fprintf(w, `{"ready":true,"stub":%t}`, stub)
 	}
 	mux.HandleFunc("GET /readyz", readyz)
 	mux.HandleFunc("GET /pass/readyz", readyz)
 
-	mux.HandleFunc("POST /pass/apple", func(w http.ResponseWriter, r *http.Request) {
+	// Both GET (?slug=) and POST (JSON body) are supported. GET is the
+	// simplest mobile-side path: app calls Linking.openURL with the URL
+	// and iOS handles the rest.
+	applePass := func(w http.ResponseWriter, r *http.Request) {
 		if stub {
 			http.Error(w, `{"error":"stub-mode: Apple Pass Type ID cert not yet provisioned"}`, http.StatusServiceUnavailable)
 			return
 		}
-		// TODO(phase-6): assemble .pkpass, sign with Pass Type ID .p12, return zip.
-		_ = json.NewEncoder(w).Encode(map[string]string{"todo": "phase-6"})
-	})
-
-	mux.HandleFunc("POST /pass/google", func(w http.ResponseWriter, r *http.Request) {
-		if stub {
-			http.Error(w, `{"error":"stub-mode: Google Wallet issuer not yet provisioned"}`, http.StatusServiceUnavailable)
+		var cardID, slug string
+		if r.Method == http.MethodGet {
+			cardID = r.URL.Query().Get("cardId")
+			slug = r.URL.Query().Get("slug")
+		} else {
+			var body struct {
+				CardID string `json:"cardId"`
+				Slug   string `json:"slug"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+				return
+			}
+			cardID, slug = body.CardID, body.Slug
+		}
+		if cardID == "" && slug == "" {
+			http.Error(w, `{"error":"cardId or slug required"}`, http.StatusBadRequest)
 			return
 		}
-		// TODO(phase-6): build GenericObject + sign JWT with service-account key.
-		_ = json.NewEncoder(w).Encode(map[string]string{"todo": "phase-6"})
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		c, err := fetchCard(ctx, apiBase, cardID, slug)
+		if err != nil {
+			slog.Warn("fetch card failed", "err", err)
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusBadGateway)
+			return
+		}
+
+		pass := buildPass(c, passTypeID, teamID, webBase)
+		assets := map[string][]byte{
+			"icon.png":    iconPNG(58, c.Template),  // 29pt @2x
+			"icon@2x.png": iconPNG(58, c.Template),
+			"logo.png":    iconPNG(160, c.Template),
+			"logo@2x.png": iconPNG(160, c.Template),
+		}
+
+		signMu.RLock()
+		defer signMu.RUnlock()
+		out, err := signer.Build(pass, assets)
+		if err != nil {
+			slog.Error("build pass failed", "err", err)
+			http.Error(w, `{"error":"sign failed"}`, http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/vnd.apple.pkpass")
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.pkpass"`, c.Slug))
+		_, _ = w.Write(out)
+	}
+	mux.HandleFunc("GET /pass/apple", applePass)
+	mux.HandleFunc("POST /pass/apple", applePass)
+
+	mux.HandleFunc("POST /pass/google", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"stub-mode: Google Wallet issuer not yet provisioned"}`, http.StatusServiceUnavailable)
 	})
 
 	addr := getenv("LISTEN_ADDR", ":8080")
@@ -64,9 +169,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
 	go func() {
-		slog.Info("pass-signer listening", "addr", addr, "version", version, "stub", stub)
+		slog.Info("pass-signer listening", "addr", addr, "version", version, "stub", stub, "passTypeID", passTypeID)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("listen failed", "err", err)
 			os.Exit(1)
@@ -77,6 +181,150 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutCtx)
+}
+
+func fetchCard(ctx context.Context, apiBase, id, slug string) (*card, error) {
+	url := apiBase
+	if id != "" {
+		url += "/v1/cards/" + id
+	} else {
+		url += "/v1/c/" + slug
+	}
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("vcard-api fetch: %w", err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		body, _ := io.ReadAll(res.Body)
+		return nil, fmt.Errorf("vcard-api %d: %s", res.StatusCode, string(body))
+	}
+	var c card
+	if err := json.NewDecoder(res.Body).Decode(&c); err != nil {
+		return nil, fmt.Errorf("decode card: %w", err)
+	}
+	return &c, nil
+}
+
+func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
+	bg, fg, lbl := templateColors(c.Template)
+
+	primary := []pkpass.Field{{Key: "name", Value: c.Name, Label: c.Label}}
+
+	secondary := []pkpass.Field{}
+	if c.Title != "" {
+		secondary = append(secondary, pkpass.Field{Key: "title", Label: "TITLE", Value: c.Title})
+	}
+	if c.Company != "" {
+		secondary = append(secondary, pkpass.Field{Key: "company", Label: "COMPANY", Value: c.Company})
+	}
+
+	back := []pkpass.Field{}
+	for i, e := range c.Emails {
+		back = append(back, pkpass.Field{Key: fmt.Sprintf("email%d", i), Label: "Email", Value: e})
+	}
+	for i, p := range c.Phones {
+		back = append(back, pkpass.Field{Key: fmt.Sprintf("phone%d", i), Label: "Phone", Value: p})
+	}
+	if c.Slug != "" {
+		back = append(back, pkpass.Field{Key: "profile", Label: "Profile", Value: webBase + "/c/" + c.Slug})
+	}
+
+	// QR encodes the public profile URL — recipient scans, lands on
+	// dynolabs.io/c/<slug>, taps Save to Contacts.
+	qrMsg := webBase + "/c/" + c.Slug
+	if c.Slug == "" {
+		qrMsg = c.Name
+	}
+
+	return pkpass.Pass{
+		FormatVersion:      1,
+		PassTypeIdentifier: passTypeID,
+		SerialNumber:       c.Slug,
+		TeamIdentifier:     teamID,
+		OrganizationName:   "Dynolabs",
+		Description:        "Dynolabs vCard — " + c.Name,
+		LogoText:           c.Name,
+		ForegroundColor:    fg,
+		BackgroundColor:    bg,
+		LabelColor:         lbl,
+		Barcodes: []pkpass.Barcode{{
+			Format:          "PKBarcodeFormatQR",
+			Message:         qrMsg,
+			MessageEncoding: "iso-8859-1",
+			AltText:         strings.TrimSpace(c.Name),
+		}},
+		Generic: &pkpass.Generic{
+			PrimaryFields:   primary,
+			SecondaryFields: secondary,
+			BackFields:      back,
+		},
+	}
+}
+
+// templateColors returns rgb(...) strings for pass background, foreground, label.
+func templateColors(template string) (bg, fg, lbl string) {
+	switch template {
+	case "gradient":
+		return "rgb(31,37,51)", "rgb(255,255,255)", "rgb(180,180,200)"
+	case "glass":
+		return "rgb(16,16,18)", "rgb(255,255,255)", "rgb(160,160,160)"
+	case "custom":
+		return "rgb(10,102,194)", "rgb(255,255,255)", "rgb(255,255,255)"
+	default: // mono
+		return "rgb(11,11,15)", "rgb(255,255,255)", "rgb(160,160,160)"
+	}
+}
+
+// iconPNG returns a tiny solid-color PNG. Apple Wallet REQUIRES icon.png
+// and icon@2x.png even though we never display them next to a QR-only pass;
+// returning an empty file fails validation. v1 ships a brand-coloured square.
+func iconPNG(size int, template string) []byte {
+	img := image.NewNRGBA(image.Rect(0, 0, size, size))
+	bgHex := "#0B0B0F"
+	switch template {
+	case "gradient":
+		bgHex = "#1F2533"
+	case "glass":
+		bgHex = "#101012"
+	case "custom":
+		bgHex = "#0A66C2"
+	}
+	r, g, b := hexToRGB(bgHex)
+	c := color.NRGBA{R: r, G: g, B: b, A: 255}
+	for y := 0; y < size; y++ {
+		for x := 0; x < size; x++ {
+			img.SetNRGBA(x, y, c)
+		}
+	}
+	var buf bytes.Buffer
+	_ = png.Encode(&buf, img)
+	return buf.Bytes()
+}
+
+func hexToRGB(h string) (uint8, uint8, uint8) {
+	if strings.HasPrefix(h, "#") {
+		h = h[1:]
+	}
+	if len(h) != 6 {
+		return 11, 11, 15
+	}
+	var rgb [3]uint8
+	for i := 0; i < 3; i++ {
+		v, err := parseHexByte(h[2*i : 2*i+2])
+		if err != nil {
+			return 11, 11, 15
+		}
+		rgb[i] = v
+	}
+	return rgb[0], rgb[1], rgb[2]
+}
+
+func parseHexByte(s string) (uint8, error) {
+	var n uint8
+	_, err := fmt.Sscanf(s, "%x", &n)
+	return n, err
 }
 
 func getenv(k, def string) string {

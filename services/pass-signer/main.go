@@ -132,10 +132,17 @@ func main() {
 		defer cancel()
 		c, err := fetchCard(ctx, apiBase, cardID, slug)
 		if err != nil {
-			slog.Warn("fetch card failed", "err", err)
+			slog.Warn("fetch card failed", "err", err, "slug", slug, "cardId", cardID, "ua", r.UserAgent())
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusBadGateway)
 			return
 		}
+		// Log every pass build with the slug requested and the name that
+		// will appear in the pass. This is how we diagnose "wallet shows
+		// wrong card" — proves which card the app actually asked for.
+		slog.Info("pass requested",
+			"slug-requested", slug, "cardId-requested", cardID,
+			"name-served", c.Name, "slug-served", c.Slug,
+			"ua", r.UserAgent())
 
 		pass := buildPass(c, passTypeID, teamID, webBase)
 		assets := map[string][]byte{

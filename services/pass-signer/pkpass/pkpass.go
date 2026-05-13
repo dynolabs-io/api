@@ -87,18 +87,22 @@ func parseKeyPEM(data []byte) (*rsa.PrivateKey, error) {
 
 // Pass is the structured metadata that becomes pass.json.
 type Pass struct {
-	FormatVersion       int        `json:"formatVersion"`
-	PassTypeIdentifier  string     `json:"passTypeIdentifier"`
-	SerialNumber        string     `json:"serialNumber"`
-	TeamIdentifier      string     `json:"teamIdentifier"`
-	OrganizationName    string     `json:"organizationName"`
-	Description         string     `json:"description"`
-	LogoText            string     `json:"logoText,omitempty"`
-	ForegroundColor     string     `json:"foregroundColor,omitempty"`
-	BackgroundColor     string     `json:"backgroundColor,omitempty"`
-	LabelColor          string     `json:"labelColor,omitempty"`
-	Barcodes            []Barcode  `json:"barcodes,omitempty"`
-	Generic             *Generic   `json:"generic,omitempty"`
+	FormatVersion      int       `json:"formatVersion"`
+	PassTypeIdentifier string    `json:"passTypeIdentifier"`
+	SerialNumber       string    `json:"serialNumber"`
+	TeamIdentifier     string    `json:"teamIdentifier"`
+	OrganizationName   string    `json:"organizationName"`
+	Description        string    `json:"description"`
+	LogoText           string    `json:"logoText,omitempty"`
+	ForegroundColor    string    `json:"foregroundColor,omitempty"`
+	BackgroundColor    string    `json:"backgroundColor,omitempty"`
+	LabelColor         string    `json:"labelColor,omitempty"`
+	Barcodes           []Barcode `json:"barcodes,omitempty"`
+	// One of Generic / StoreCard / Coupon / EventTicket / BoardingPass.
+	// Different styles get different visual layouts in Wallet — StoreCard
+	// has a notably larger barcode area than Generic.
+	Generic   *Style `json:"generic,omitempty"`
+	StoreCard *Style `json:"storeCard,omitempty"`
 }
 
 type Barcode struct {
@@ -108,13 +112,18 @@ type Barcode struct {
 	AltText         string `json:"altText,omitempty"`
 }
 
-type Generic struct {
+// Style is shared by Generic / StoreCard / etc — same field set.
+type Style struct {
 	HeaderFields    []Field `json:"headerFields,omitempty"`
 	PrimaryFields   []Field `json:"primaryFields,omitempty"`
 	SecondaryFields []Field `json:"secondaryFields,omitempty"`
 	AuxiliaryFields []Field `json:"auxiliaryFields,omitempty"`
 	BackFields      []Field `json:"backFields,omitempty"`
 }
+
+// Generic is kept as an alias for backwards compat with callers that
+// still type pkpass.Generic{...}.
+type Generic = Style
 
 type Field struct {
 	Key   string `json:"key"`

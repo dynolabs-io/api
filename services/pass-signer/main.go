@@ -215,7 +215,7 @@ func fetchCard(ctx context.Context, apiBase, id, slug string) (*card, error) {
 }
 
 func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
-	bg, fg, lbl := templateColors(c.Template)
+	bg, fg, lbl := templateColors(c.Template, c.CustomColor)
 
 	primary := []pkpass.Field{{Key: "name", Value: c.Name, Label: c.Label}}
 
@@ -261,7 +261,10 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 			MessageEncoding: "iso-8859-1",
 			AltText:         strings.TrimSpace(c.Name),
 		}},
-		Generic: &pkpass.Generic{
+		// StoreCard layout gives a much larger barcode area than Generic
+		// in Apple Wallet — the QR is roughly 2x as tall, which is what
+		// users actually need (a scannable QR, not field-padding).
+		StoreCard: &pkpass.Style{
 			PrimaryFields:   primary,
 			SecondaryFields: secondary,
 			BackFields:      back,
@@ -307,14 +310,22 @@ func escapeVCard(s string) string {
 }
 
 // templateColors returns rgb(...) strings for pass background, foreground, label.
-func templateColors(template string) (bg, fg, lbl string) {
+// For "custom", honour the user-picked customColor (hex like #16A34A).
+// Previously this hardcoded blue regardless of customColor — that's why a
+// green-template card showed up as a blue pass in Wallet.
+func templateColors(template, customColor string) (bg, fg, lbl string) {
 	switch template {
 	case "gradient":
 		return "rgb(31,37,51)", "rgb(255,255,255)", "rgb(180,180,200)"
 	case "glass":
 		return "rgb(16,16,18)", "rgb(255,255,255)", "rgb(160,160,160)"
 	case "custom":
-		return "rgb(10,102,194)", "rgb(255,255,255)", "rgb(255,255,255)"
+		hex := customColor
+		if hex == "" {
+			hex = "#0A66C2"
+		}
+		r, g, b := hexToRGB(hex)
+		return fmt.Sprintf("rgb(%d,%d,%d)", r, g, b), "rgb(255,255,255)", "rgb(255,255,255)"
 	default: // mono
 		return "rgb(11,11,15)", "rgb(255,255,255)", "rgb(160,160,160)"
 	}
@@ -332,6 +343,9 @@ func iconPNG(size int, template string) []byte {
 	case "glass":
 		bgHex = "#101012"
 	case "custom":
+		// Caller passes customColor via the c.CustomColor field; the icon
+		// rendering ignores it for now (icons are small thumbnails). The
+		// pass background uses the customColor properly via templateColors.
 		bgHex = "#0A66C2"
 	}
 	r, g, b := hexToRGB(bgHex)

@@ -40,17 +40,18 @@ type cardSocial struct {
 	URL  string `json:"url"`
 }
 type card struct {
-	ID       string       `json:"id"`
-	Slug     string       `json:"slug"`
-	Label    string       `json:"label"`
-	Name     string       `json:"name"`
-	Title    string       `json:"title"`
-	Company  string       `json:"company"`
-	Emails   []string     `json:"emails"`
-	Phones   []string     `json:"phones"`
-	Socials  []cardSocial `json:"socials"`
-	PhotoURL string       `json:"photoUrl"`
-	Template string       `json:"template"`
+	ID          string       `json:"id"`
+	Slug        string       `json:"slug"`
+	Label       string       `json:"label"`
+	Name        string       `json:"name"`
+	Title       string       `json:"title"`
+	Company     string       `json:"company"`
+	Emails      []string     `json:"emails"`
+	Phones      []string     `json:"phones"`
+	Socials     []cardSocial `json:"socials"`
+	PhotoURL    string       `json:"photoUrl"`
+	Template    string       `json:"template"`
+	CustomColor string       `json:"customColor"`
 }
 
 func main() {

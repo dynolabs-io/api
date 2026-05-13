@@ -311,22 +311,21 @@ func escapeVCard(s string) string {
 }
 
 // templateColors returns rgb(...) strings for pass background, foreground, label.
-// For "custom", honour the user-picked customColor (hex like #16A34A).
-// Previously this hardcoded blue regardless of customColor — that's why a
-// green-template card showed up as a blue pass in Wallet.
+// customColor wins regardless of template — the mobile app applies the user's
+// picked color on every template, so the pass must match. Template only
+// picks the default when no customColor was set.
 func templateColors(template, customColor string) (bg, fg, lbl string) {
+	if customColor != "" {
+		r, g, b := hexToRGB(customColor)
+		return fmt.Sprintf("rgb(%d,%d,%d)", r, g, b), "rgb(255,255,255)", "rgb(255,255,255)"
+	}
 	switch template {
 	case "gradient":
 		return "rgb(31,37,51)", "rgb(255,255,255)", "rgb(180,180,200)"
 	case "glass":
 		return "rgb(16,16,18)", "rgb(255,255,255)", "rgb(160,160,160)"
 	case "custom":
-		hex := customColor
-		if hex == "" {
-			hex = "#0A66C2"
-		}
-		r, g, b := hexToRGB(hex)
-		return fmt.Sprintf("rgb(%d,%d,%d)", r, g, b), "rgb(255,255,255)", "rgb(255,255,255)"
+		return "rgb(10,102,194)", "rgb(255,255,255)", "rgb(255,255,255)"
 	default: // mono
 		return "rgb(11,11,15)", "rgb(255,255,255)", "rgb(160,160,160)"
 	}

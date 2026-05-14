@@ -23,6 +23,7 @@ type Card struct {
 	PhotoURL    string    `json:"photoUrl,omitempty"`
 	Template    string    `json:"template"`
 	CustomColor string    `json:"customColor,omitempty"`
+	WalletStyle string    `json:"walletStyle,omitempty"`
 	DeviceID    string    `json:"deviceId,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`

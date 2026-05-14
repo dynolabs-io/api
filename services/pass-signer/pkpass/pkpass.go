@@ -101,9 +101,11 @@ type Pass struct {
 	// One of Generic / StoreCard / Coupon / EventTicket / BoardingPass.
 	// EventTicket has the most prominent center-of-pass barcode area —
 	// much larger than Generic or StoreCard which keep the barcode small.
-	Generic     *Style `json:"generic,omitempty"`
-	StoreCard   *Style `json:"storeCard,omitempty"`
-	EventTicket *Style `json:"eventTicket,omitempty"`
+	Generic     *Style       `json:"generic,omitempty"`
+	StoreCard   *Style       `json:"storeCard,omitempty"`
+	EventTicket *Style       `json:"eventTicket,omitempty"`
+	Coupon      *Style       `json:"coupon,omitempty"`
+	BoardingPass *BoardingPassStyle `json:"boardingPass,omitempty"`
 
 	// iOS 18+ enhanced event ticket layout. When set to
 	// ["posterEventTicket", "eventTicket"], iOS 18+ renders the new
@@ -136,6 +138,20 @@ type Style struct {
 // Generic is kept as an alias for backwards compat with callers that
 // still type pkpass.Generic{...}.
 type Generic = Style
+
+// BoardingPassStyle adds the mandatory transitType field on top of the
+// regular Style. Without transitType, Apple Wallet rejects the pass.
+// Valid values: PKTransitTypeAir, PKTransitTypeBoat, PKTransitTypeBus,
+// PKTransitTypeGeneric, PKTransitTypeTrain. The transit type doesn't
+// change the visual layout meaningfully — it just shows a small icon.
+type BoardingPassStyle struct {
+	TransitType     string  `json:"transitType"`
+	HeaderFields    []Field `json:"headerFields,omitempty"`
+	PrimaryFields   []Field `json:"primaryFields,omitempty"`
+	SecondaryFields []Field `json:"secondaryFields,omitempty"`
+	AuxiliaryFields []Field `json:"auxiliaryFields,omitempty"`
+	BackFields      []Field `json:"backFields,omitempty"`
+}
 
 type Field struct {
 	Key   string `json:"key"`

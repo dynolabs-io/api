@@ -528,6 +528,16 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 	}
 	// Wallet layout per user choice.
 	switch c.WalletStyle {
+	case "boardingPass":
+		// Boarding-pass style — the biggest barcode Apple Wallet renders
+		// without NFC entitlement. The QR fills the lower portion of
+		// the pass at ~300pt × 300pt on iPhone (vs ~200pt for eventTicket).
+		pass.BoardingPass = &pkpass.BoardingPassStyle{
+			TransitType:     "PKTransitTypeGeneric",
+			PrimaryFields:   primary,
+			SecondaryFields: secondary,
+			BackFields:      back,
+		}
 	case "minimal":
 		// generic layout: small QR + just name. No secondary fields.
 		pass.Generic = &pkpass.Style{PrimaryFields: primary, BackFields: back}

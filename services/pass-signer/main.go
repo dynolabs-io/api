@@ -188,6 +188,12 @@ func main() {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusBadGateway)
 			return
 		}
+		// ?style= query param overrides the card's saved wallet_style for
+		// this request only. Useful for previewing all layouts without
+		// editing the card.
+		if styleOverride := r.URL.Query().Get("style"); styleOverride != "" {
+			c.WalletStyle = styleOverride
+		}
 		// Log every pass build with the slug requested and the name that
 		// will appear in the pass. This is how we diagnose "wallet shows
 		// wrong card" — proves which card the app actually asked for.

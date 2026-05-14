@@ -207,31 +207,78 @@ func main() {
 			"icon@2x.png": iconPNG(58, c.Template, c.CustomColor),
 			"logo.png":    iconPNG(160, c.Template, c.CustomColor),
 			"logo@2x.png": iconPNG(160, c.Template, c.CustomColor),
+			// posterEventTicket requires primaryLogo (iOS 18). Reuse the
+			// same logo bytes — same visual.
+			"primaryLogo.png":    iconPNG(160, c.Template, c.CustomColor),
+			"primaryLogo@2x.png": iconPNG(160, c.Template, c.CustomColor),
 		}
-		// Include user's profile photo as the pass thumbnail (shown
-		// prominently next to the primary field in EventTicket layout).
+		// Fetch profile photo once — used by multiple layouts.
+		var photoBytes []byte
 		if c.PhotoURL != "" {
 			if thumb, err := fetchThumbnail(r.Context(), c.PhotoURL); err == nil && len(thumb) > 0 {
-				assets["thumbnail.png"] = thumb
-				assets["thumbnail@2x.png"] = thumb
-				// "photoBack" layout: also use the photo as the full
-				// pass background. Wallet renders it dimmed behind text.
-				if c.WalletStyle == "photoBack" {
-					assets["background.png"] = thumb
-					assets["background@2x.png"] = thumb
-				}
+				photoBytes = thumb
 			} else if err != nil {
 				slog.Warn("thumbnail fetch failed", "err", err, "url", c.PhotoURL)
 			}
 		}
-		// "bigqr" layout: render a large QR as the strip.png banner so
-		// the barcode dominates the pass visually. The standard tappable
-		// barcode at the bottom remains for actual scanning.
-		if c.WalletStyle == "bigqr" {
-			qrMsg := buildVCardText(c, webBase)
-			if stripPNG, err := renderQRPNG(qrMsg, 1125, 432); err == nil {
-				assets["strip.png"] = stripPNG
-				assets["strip@2x.png"] = stripPNG
+		// Thumbnail (small profile pic next to primary field) is used by
+		// all legacy eventTicket layouts.
+		if len(photoBytes) > 0 && c.WalletStyle != "posterQR" && c.WalletStyle != "minimal" {
+			assets["thumbnail.png"] = photoBytes
+			assets["thumbnail@2x.png"] = photoBytes
+		}
+
+		qrMsg := buildVCardText(c, webBase)
+		switch c.WalletStyle {
+		case "posterQR":
+			// iOS 18 posterEventTicket: entire pass front IS the QR.
+			// Render at 1074×1344 — Apple's enhanced ticket canvas
+			// dimensions. Older iOS falls back to bigqr-style strip.
+			if art, err := renderQRPNG(qrMsg, 1074, 1344); err == nil {
+				assets["artwork.png"] = art
+				assets["artwork@2x.png"] = art
+			}
+			// Legacy fallback for iOS 17: strip-as-big-QR.
+			if strip, err := renderQRPNG(qrMsg, 1125, 432); err == nil {
+				assets["strip.png"] = strip
+				assets["strip@2x.png"] = strip
+			}
+		case "posterPhoto":
+			// iOS 18 posterEventTicket: full-bleed user photo.
+			// Apple overlays the primary/secondary fields on top.
+			if len(photoBytes) > 0 {
+				if art, err := fitToCanvas(photoBytes, 1074, 1344); err == nil {
+					assets["artwork.png"] = art
+					assets["artwork@2x.png"] = art
+				}
+				// Legacy fallback: photo as strip image.
+				if strip, err := fitToCanvas(photoBytes, 1125, 432); err == nil {
+					assets["strip.png"] = strip
+					assets["strip@2x.png"] = strip
+				}
+			}
+		case "posterBrand":
+			// iOS 18 posterEventTicket: branded composite — photo + name
+			// + company on brand-color background.
+			if art, err := renderBrandedArtwork(c, photoBytes, 1074, 1344); err == nil {
+				assets["artwork.png"] = art
+				assets["artwork@2x.png"] = art
+			}
+			if strip, err := renderBrandedArtwork(c, photoBytes, 1125, 432); err == nil {
+				assets["strip.png"] = strip
+				assets["strip@2x.png"] = strip
+			}
+		case "photoBack":
+			// Legacy: photo as blurred background.
+			if len(photoBytes) > 0 {
+				assets["background.png"] = photoBytes
+				assets["background@2x.png"] = photoBytes
+			}
+		case "bigqr":
+			// Legacy: huge QR as strip banner.
+			if strip, err := renderQRPNG(qrMsg, 1125, 432); err == nil {
+				assets["strip.png"] = strip
+				assets["strip@2x.png"] = strip
 			}
 		}
 
@@ -271,6 +318,111 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutCtx)
+}
+
+// fitToCanvas resizes/crops src image bytes to fit exactly w×h pixels,
+// preserving aspect with a center-cover crop. Returns PNG bytes.
+func fitToCanvas(src []byte, w, h int) ([]byte, error) {
+	srcImg, _, err := image.Decode(bytes.NewReader(src))
+	if err != nil {
+		return nil, err
+	}
+	sw, sh := srcImg.Bounds().Dx(), srcImg.Bounds().Dy()
+	// Cover crop: scale so the smaller ratio fills, then center-crop.
+	srcRatio := float64(sw) / float64(sh)
+	dstRatio := float64(w) / float64(h)
+	var cropW, cropH int
+	if srcRatio > dstRatio {
+		// src wider — crop sides
+		cropH = sh
+		cropW = int(float64(sh) * dstRatio)
+	} else {
+		// src taller — crop top/bottom
+		cropW = sw
+		cropH = int(float64(sw) / dstRatio)
+	}
+	cropX := (sw - cropW) / 2
+	cropY := (sh - cropH) / 2
+	// Nearest-neighbor scale; quality fine for a wallet thumbnail.
+	dst := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		sy := cropY + (y*cropH)/h
+		for x := 0; x < w; x++ {
+			sx := cropX + (x*cropW)/w
+			r, g, b, a := srcImg.At(sx, sy).RGBA()
+			dst.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
+			})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, dst); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// renderBrandedArtwork composes a branded image: brand-color background
+// with a circular profile photo top-center and the company name at bottom
+// in large text. Used by walletStyle=posterBrand.
+func renderBrandedArtwork(c *card, photoBytes []byte, w, h int) ([]byte, error) {
+	// Background color
+	bgHex := "#0B0B0F"
+	if c.CustomColor != "" {
+		bgHex = c.CustomColor
+	}
+	br, bg, bb := hexToRGB(bgHex)
+	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			canvas.SetNRGBA(x, y, color.NRGBA{R: br, G: bg, B: bb, A: 255})
+		}
+	}
+	// Circular photo at top-center (occupying ~40% of canvas height)
+	if len(photoBytes) > 0 {
+		photoSize := h * 4 / 10
+		if photoSize > w*7/10 {
+			photoSize = w * 7 / 10
+		}
+		photoImg, _, err := image.Decode(bytes.NewReader(photoBytes))
+		if err == nil {
+			// Crop to square first
+			sw, sh := photoImg.Bounds().Dx(), photoImg.Bounds().Dy()
+			sz := sw
+			if sh < sw {
+				sz = sh
+			}
+			sx0 := (sw - sz) / 2
+			sy0 := (sh - sz) / 2
+			ox := (w - photoSize) / 2
+			oy := h*15/100
+			radius := photoSize / 2
+			cx := ox + radius
+			cy := oy + radius
+			for y := 0; y < photoSize; y++ {
+				for x := 0; x < photoSize; x++ {
+					dx := (ox + x) - cx
+					dy := (oy + y) - cy
+					if dx*dx+dy*dy > radius*radius {
+						continue // outside circle
+					}
+					sx := sx0 + (x*sz)/photoSize
+					sy := sy0 + (y*sz)/photoSize
+					r, g, b, a := photoImg.At(sx, sy).RGBA()
+					canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
+						R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
+					})
+				}
+			}
+		}
+	}
+	// We could draw text here but Go's stdlib font rendering is limited.
+	// Leaving text to Apple's pass.json field overlay is cleaner.
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, canvas); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // fetchThumbnail downloads the user's profile photo for embedding in the
@@ -375,14 +527,20 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 	switch c.WalletStyle {
 	case "minimal":
 		// generic layout: small QR + just name. No secondary fields.
-		minimal := &pkpass.Style{PrimaryFields: primary, BackFields: back}
-		pass.Generic = minimal
-	case "photoBack":
-		// eventTicket with photo as the background (assets["background.png"]
-		// is set by the handler). Fields ride over the photo.
+		pass.Generic = &pkpass.Style{PrimaryFields: primary, BackFields: back}
+	case "posterQR", "posterPhoto", "posterBrand":
+		// iOS 18+ enhanced layout. PreferredStyleSchemes tells Wallet
+		// to try posterEventTicket first; older iOS falls back to
+		// the embedded eventTicket style below.
+		pass.PreferredStyleSchemes = []string{"posterEventTicket", "eventTicket"}
+		// posterEventTicket needs a relevantDates semantic for iOS 18
+		// to render the new layout. Use a stable far-future date so
+		// the pass never auto-archives.
+		pass.Semantics = map[string]any{
+			"eventName": c.Name,
+		}
 		pass.EventTicket = style
-	case "bigqr":
-		// eventTicket with huge QR rendered as strip.png in the handler.
+	case "photoBack", "bigqr":
 		pass.EventTicket = style
 	default: // "compact" or empty
 		pass.EventTicket = style

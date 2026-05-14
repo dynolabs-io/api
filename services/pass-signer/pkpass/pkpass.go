@@ -104,6 +104,17 @@ type Pass struct {
 	Generic     *Style `json:"generic,omitempty"`
 	StoreCard   *Style `json:"storeCard,omitempty"`
 	EventTicket *Style `json:"eventTicket,omitempty"`
+
+	// iOS 18+ enhanced event ticket layout. When set to
+	// ["posterEventTicket", "eventTicket"], iOS 18+ renders the new
+	// full-bleed artwork layout (Nene Royal style), older iOS falls
+	// back to the legacy eventTicket layout. Requires artwork.png /
+	// primaryLogo.png / secondaryLogo.png assets in the bundle.
+	PreferredStyleSchemes []string `json:"preferredStyleSchemes,omitempty"`
+
+	// Semantic tags needed for posterEventTicket to render correctly.
+	// Apple requires at least an event start date for the new layout.
+	Semantics map[string]any `json:"semantics,omitempty"`
 }
 
 type Barcode struct {

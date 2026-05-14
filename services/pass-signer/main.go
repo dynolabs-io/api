@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	_ "image/gif"  // register GIF decoder for image.Decode
+	_ "image/jpeg" // register JPEG decoder — photo-cdn returns JPEGs
 	"image/png"
 	"io"
 	"log/slog"
@@ -34,25 +36,20 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 )
 
-// renderQRPNG produces a QR code PNG at the requested dimensions with
-// padding. The QR is centered and high-contrast (black-on-white) so it
-// scans from across a room when used as the strip.png banner.
+// renderQRPNG produces a QR code PNG sized to fill the canvas as much
+// as possible. The QR is square; for non-square canvases it's centered
+// at full min(w,h) with white margin in the longer dimension.
+// No inner padding — the QR goes edge-to-edge in its dimension.
 func renderQRPNG(content string, w, h int) ([]byte, error) {
 	q, err := qrcode.New(content, qrcode.Medium)
 	if err != nil {
 		return nil, err
 	}
 	q.DisableBorder = true
-	// Apple strip image is fixed-aspect; render QR at min(w,h) then
-	// composite onto a white canvas of the requested dimensions.
-	size := h
+	// QR is square; fill the smaller canvas dimension entirely.
+	qrSize := h
 	if w < h {
-		size = w
-	}
-	// Apply some inner padding so the QR isn't flush to the strip edges.
-	qrSize := size - 60
-	if qrSize < 200 {
-		qrSize = size
+		qrSize = w
 	}
 	qrPNG, err := q.PNG(qrSize)
 	if err != nil {
@@ -63,13 +60,11 @@ func renderQRPNG(content string, w, h int) ([]byte, error) {
 		return nil, err
 	}
 	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
-	// White background
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			canvas.SetNRGBA(x, y, color.NRGBA{255, 255, 255, 255})
 		}
 	}
-	// Center the QR
 	ox := (w - qrImg.Bounds().Dx()) / 2
 	oy := (h - qrImg.Bounds().Dy()) / 2
 	bounds := qrImg.Bounds()
@@ -232,9 +227,11 @@ func main() {
 		switch c.WalletStyle {
 		case "posterQR":
 			// iOS 18 posterEventTicket: entire pass front IS the QR.
-			// Render at 1074×1344 — Apple's enhanced ticket canvas
-			// dimensions. Older iOS falls back to bigqr-style strip.
-			if art, err := renderQRPNG(qrMsg, 1074, 1344); err == nil {
+			// Use a square 1074×1074 canvas — QR fills it edge-to-edge
+			// instead of being bordered by white bands when stretched
+			// to Apple's 1074×1344. Wallet still renders it at correct
+			// aspect — it just centers the square in the visible area.
+			if art, err := renderQRPNG(qrMsg, 1074, 1074); err == nil {
 				assets["artwork.png"] = art
 				assets["artwork@2x.png"] = art
 			}

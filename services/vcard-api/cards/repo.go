@@ -46,12 +46,13 @@ func (r *Repo) Create(ctx context.Context, c *Card) error {
 	socials, _ := json.Marshal(orEmptySocials(c.Socials))
 
 	const q = `
-		INSERT INTO cards (slug, label, name, title, company, emails, phones, socials, photo_url, template, custom_color, wallet_style, device_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		INSERT INTO cards (slug, label, name, title, company, emails, phones, socials, photo_url, brand_logo_url, template, custom_color, wallet_style, device_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		RETURNING id, created_at, updated_at`
 	row := r.db.QueryRowContext(ctx, q,
 		c.Slug, c.Label, c.Name, nullable(c.Title), nullable(c.Company),
-		emails, phones, socials, nullable(c.PhotoURL), c.Template, nullable(c.CustomColor), nullable(c.WalletStyle), nullable(c.DeviceID),
+		emails, phones, socials, nullable(c.PhotoURL), nullable(c.BrandLogoURL),
+		c.Template, nullable(c.CustomColor), nullable(c.WalletStyle), nullable(c.DeviceID),
 	)
 	if err := row.Scan(&c.ID, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return fmt.Errorf("insert card: %w", err)
@@ -93,12 +94,12 @@ func (r *Repo) Update(ctx context.Context, c *Card) error {
 	socials, _ := json.Marshal(orEmptySocials(c.Socials))
 	const q = `
 		UPDATE cards SET label=$1, name=$2, title=$3, company=$4,
-		  emails=$5, phones=$6, socials=$7, photo_url=$8,
-		  template=$9, custom_color=$10, wallet_style=$11, updated_at=now()
-		WHERE id=$12 RETURNING updated_at`
+		  emails=$5, phones=$6, socials=$7, photo_url=$8, brand_logo_url=$9,
+		  template=$10, custom_color=$11, wallet_style=$12, updated_at=now()
+		WHERE id=$13 RETURNING updated_at`
 	row := r.db.QueryRowContext(ctx, q,
 		c.Label, c.Name, nullable(c.Title), nullable(c.Company),
-		emails, phones, socials, nullable(c.PhotoURL),
+		emails, phones, socials, nullable(c.PhotoURL), nullable(c.BrandLogoURL),
 		c.Template, nullable(c.CustomColor), nullable(c.WalletStyle), c.ID)
 	if err := row.Scan(&c.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -125,7 +126,8 @@ const baseSelect = `
 	SELECT id, slug, label, name,
 	       COALESCE(title, ''), COALESCE(company, ''),
 	       emails, phones, socials,
-	       COALESCE(photo_url, ''), template,
+	       COALESCE(photo_url, ''), COALESCE(brand_logo_url, ''),
+	       template,
 	       COALESCE(custom_color, ''), COALESCE(wallet_style, ''),
 	       COALESCE(device_id, ''),
 	       created_at, updated_at
@@ -154,7 +156,8 @@ func scanCard(s rowScanner) (*Card, error) {
 		&c.ID, &c.Slug, &c.Label, &c.Name,
 		&c.Title, &c.Company,
 		&emailsRaw, &phonesRaw, &socialsRaw,
-		&c.PhotoURL, &c.Template, &c.CustomColor, &c.WalletStyle, &c.DeviceID,
+		&c.PhotoURL, &c.BrandLogoURL, &c.Template,
+		&c.CustomColor, &c.WalletStyle, &c.DeviceID,
 		&c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err

@@ -31,6 +31,7 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS cards_device_idx ON cards(device_id)`,
 		`ALTER TABLE cards ADD COLUMN IF NOT EXISTS wallet_style TEXT`,
+		`ALTER TABLE cards ADD COLUMN IF NOT EXISTS brand_logo_url TEXT`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

@@ -90,19 +90,20 @@ type cardSocial struct {
 	URL  string `json:"url"`
 }
 type card struct {
-	ID          string       `json:"id"`
-	Slug        string       `json:"slug"`
-	Label       string       `json:"label"`
-	Name        string       `json:"name"`
-	Title       string       `json:"title"`
-	Company     string       `json:"company"`
-	Emails      []string     `json:"emails"`
-	Phones      []string     `json:"phones"`
-	Socials     []cardSocial `json:"socials"`
-	PhotoURL    string       `json:"photoUrl"`
-	Template    string       `json:"template"`
-	CustomColor string       `json:"customColor"`
-	WalletStyle string       `json:"walletStyle"` // compact | bigqr | photoBack | minimal
+	ID           string       `json:"id"`
+	Slug         string       `json:"slug"`
+	Label        string       `json:"label"`
+	Name         string       `json:"name"`
+	Title        string       `json:"title"`
+	Company      string       `json:"company"`
+	Emails       []string     `json:"emails"`
+	Phones       []string     `json:"phones"`
+	Socials      []cardSocial `json:"socials"`
+	PhotoURL     string       `json:"photoUrl"`
+	BrandLogoURL string       `json:"brandLogoUrl"`
+	Template     string       `json:"template"`
+	CustomColor  string       `json:"customColor"`
+	WalletStyle  string       `json:"walletStyle"` // photoStrip | logoStrip
 }
 
 func main() {
@@ -203,85 +204,87 @@ func main() {
 			"ua", r.UserAgent())
 
 		pass := buildPass(c, passTypeID, teamID, webBase)
-		assets := map[string][]byte{
-			"icon.png":    iconPNG(58, c.Template, c.CustomColor),
-			"icon@2x.png": iconPNG(58, c.Template, c.CustomColor),
-			"logo.png":    iconPNG(160, c.Template, c.CustomColor),
-			"logo@2x.png": iconPNG(160, c.Template, c.CustomColor),
-			// posterEventTicket requires primaryLogo (iOS 18). Reuse the
-			// same logo bytes — same visual.
-			"primaryLogo.png":    iconPNG(160, c.Template, c.CustomColor),
-			"primaryLogo@2x.png": iconPNG(160, c.Template, c.CustomColor),
-		}
-		// Fetch profile photo once — used by multiple layouts.
-		var photoBytes []byte
-		if c.PhotoURL != "" {
-			if thumb, err := fetchThumbnail(r.Context(), c.PhotoURL); err == nil && len(thumb) > 0 {
-				photoBytes = thumb
+
+		// Fetch brand logo + profile photo once.
+		var brandLogoBytes, photoBytes []byte
+		if c.BrandLogoURL != "" {
+			if b, err := fetchThumbnail(r.Context(), c.BrandLogoURL); err == nil && len(b) > 0 {
+				brandLogoBytes = b
 			} else if err != nil {
-				slog.Warn("thumbnail fetch failed", "err", err, "url", c.PhotoURL)
+				slog.Warn("brand logo fetch failed", "err", err, "url", c.BrandLogoURL)
 			}
 		}
-		// Thumbnail (small profile pic next to primary field) is used by
-		// all legacy eventTicket layouts.
-		if len(photoBytes) > 0 && c.WalletStyle != "posterQR" && c.WalletStyle != "minimal" {
-			assets["thumbnail.png"] = photoBytes
-			assets["thumbnail@2x.png"] = photoBytes
+		if c.PhotoURL != "" {
+			if p, err := fetchThumbnail(r.Context(), c.PhotoURL); err == nil && len(p) > 0 {
+				photoBytes = p
+			} else if err != nil {
+				slog.Warn("photo fetch failed", "err", err, "url", c.PhotoURL)
+			}
 		}
 
-		qrMsg := buildVCardText(c, webBase)
-		switch c.WalletStyle {
-		case "posterQR":
-			// iOS 18 posterEventTicket: entire pass front IS the QR.
-			// Use a square 1074×1074 canvas — QR fills it edge-to-edge
-			// instead of being bordered by white bands when stretched
-			// to Apple's 1074×1344. Wallet still renders it at correct
-			// aspect — it just centers the square in the visible area.
-			if art, err := renderQRPNG(qrMsg, 1074, 1074); err == nil {
-				assets["artwork.png"] = art
-				assets["artwork@2x.png"] = art
+		// Icon + logo: the user's brand logo if uploaded, else a
+		// brand-color tile (same as before). The brand logo gives the
+		// pass an identity in Wallet's lock-screen icon strip.
+		var iconAsset, logoAsset []byte
+		if len(brandLogoBytes) > 0 {
+			// Apple wants square icon (29pt @2x = 58px, @3x = 87px) and
+			// rectangular logo (max 160pt × 50pt @2x = 320×100, @3x = 480×150).
+			// Resize the brand logo for each.
+			if ic, err := resizeSquare(brandLogoBytes, 87); err == nil {
+				iconAsset = ic
 			}
-			// Legacy fallback for iOS 17: strip-as-big-QR.
-			if strip, err := renderQRPNG(qrMsg, 1125, 432); err == nil {
-				assets["strip.png"] = strip
-				assets["strip@2x.png"] = strip
+			if lg, err := fitToCanvasTransparent(brandLogoBytes, 480, 150); err == nil {
+				logoAsset = lg
 			}
-		case "posterPhoto":
-			// iOS 18 posterEventTicket: full-bleed user photo.
-			// Apple overlays the primary/secondary fields on top.
+		}
+		if iconAsset == nil {
+			iconAsset = iconPNG(87, c.Template, c.CustomColor)
+		}
+		if logoAsset == nil {
+			logoAsset = iconPNG(160, c.Template, c.CustomColor)
+		}
+		assets := map[string][]byte{
+			"icon.png":    iconAsset,
+			"icon@2x.png": iconAsset,
+			"icon@3x.png": iconAsset,
+			"logo.png":    logoAsset,
+			"logo@2x.png": logoAsset,
+		}
+
+		// Strip image fills the top ~25% of the pass front, full width.
+		// This is the biggest visible image slot Apple gives us in the
+		// eventTicket layout.
+		// - photoStrip (default if photo present): user's profile photo, full width
+		// - logoStrip: brand-color background with the brand logo centered
+		strip := c.WalletStyle
+		if strip == "" {
 			if len(photoBytes) > 0 {
-				if art, err := fitToCanvas(photoBytes, 1074, 1344); err == nil {
-					assets["artwork.png"] = art
-					assets["artwork@2x.png"] = art
-				}
-				// Legacy fallback: photo as strip image.
-				if strip, err := fitToCanvas(photoBytes, 1125, 432); err == nil {
-					assets["strip.png"] = strip
-					assets["strip@2x.png"] = strip
-				}
+				strip = "photoStrip"
+			} else {
+				strip = "logoStrip"
 			}
-		case "posterBrand":
-			// iOS 18 posterEventTicket: branded composite — photo + name
-			// + company on brand-color background.
-			if art, err := renderBrandedArtwork(c, photoBytes, 1074, 1344); err == nil {
-				assets["artwork.png"] = art
-				assets["artwork@2x.png"] = art
-			}
-			if strip, err := renderBrandedArtwork(c, photoBytes, 1125, 432); err == nil {
-				assets["strip.png"] = strip
-				assets["strip@2x.png"] = strip
-			}
-		case "photoBack":
-			// Legacy: photo as blurred background.
+		}
+		switch strip {
+		case "photoStrip":
 			if len(photoBytes) > 0 {
-				assets["background.png"] = photoBytes
-				assets["background@2x.png"] = photoBytes
+				if s, err := fitToCanvas(photoBytes, 1125, 432); err == nil {
+					assets["strip.png"] = s
+					assets["strip@2x.png"] = s
+				}
 			}
-		case "bigqr":
-			// Legacy: huge QR as strip banner.
-			if strip, err := renderQRPNG(qrMsg, 1125, 432); err == nil {
-				assets["strip.png"] = strip
-				assets["strip@2x.png"] = strip
+		case "logoStrip":
+			// Brand color bg + centered logo. Looks like a corporate banner.
+			if s, err := renderLogoStrip(c, brandLogoBytes, 1125, 432); err == nil {
+				assets["strip.png"] = s
+				assets["strip@2x.png"] = s
+			}
+		}
+		// Thumbnail also gets the profile photo so it shows in lock-screen
+		// notifications alongside the icon.
+		if len(photoBytes) > 0 {
+			if t, err := resizeSquare(photoBytes, 180); err == nil {
+				assets["thumbnail.png"] = t
+				assets["thumbnail@2x.png"] = t
 			}
 		}
 
@@ -428,6 +431,107 @@ func renderBrandedArtwork(c *card, photoBytes []byte, w, h int) ([]byte, error) 
 	return buf.Bytes(), nil
 }
 
+// resizeSquare crops to a centered square then resizes to size×size.
+func resizeSquare(src []byte, size int) ([]byte, error) {
+	return fitToCanvas(src, size, size)
+}
+
+// fitToCanvasTransparent resizes src to fit INSIDE w×h preserving aspect
+// (no crop) and centers it on a transparent canvas. Used for the brand
+// logo where we don't want to distort wide/short logos.
+func fitToCanvasTransparent(src []byte, w, h int) ([]byte, error) {
+	srcImg, _, err := image.Decode(bytes.NewReader(src))
+	if err != nil {
+		return nil, err
+	}
+	sw, sh := srcImg.Bounds().Dx(), srcImg.Bounds().Dy()
+	srcRatio := float64(sw) / float64(sh)
+	dstRatio := float64(w) / float64(h)
+	var contentW, contentH int
+	if srcRatio > dstRatio {
+		// Logo is wider than canvas — fit by width
+		contentW = w
+		contentH = int(float64(w) / srcRatio)
+	} else {
+		contentH = h
+		contentW = int(float64(h) * srcRatio)
+	}
+	ox := (w - contentW) / 2
+	oy := (h - contentH) / 2
+	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < contentH; y++ {
+		sy := (y * sh) / contentH
+		for x := 0; x < contentW; x++ {
+			sx := (x * sw) / contentW
+			r, g, b, a := srcImg.At(sx, sy).RGBA()
+			canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
+				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
+			})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, canvas); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// renderLogoStrip composes the brand color as background + the brand
+// logo (if available) centered. Used for walletStyle=logoStrip.
+func renderLogoStrip(c *card, logoBytes []byte, w, h int) ([]byte, error) {
+	bgHex := "#0B0B0F"
+	if c.CustomColor != "" {
+		bgHex = c.CustomColor
+	} else {
+		switch c.Template {
+		case "gradient":
+			bgHex = "#1F2533"
+		case "glass":
+			bgHex = "#101012"
+		}
+	}
+	br, bg, bb := hexToRGB(bgHex)
+	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			canvas.SetNRGBA(x, y, color.NRGBA{R: br, G: bg, B: bb, A: 255})
+		}
+	}
+	// Place logo centered, occupying ~70% of strip height
+	if len(logoBytes) > 0 {
+		logoImg, _, err := image.Decode(bytes.NewReader(logoBytes))
+		if err == nil {
+			targetH := h * 70 / 100
+			lw, lh := logoImg.Bounds().Dx(), logoImg.Bounds().Dy()
+			targetW := lw * targetH / lh
+			if targetW > w*80/100 {
+				targetW = w * 80 / 100
+				targetH = lh * targetW / lw
+			}
+			ox := (w - targetW) / 2
+			oy := (h - targetH) / 2
+			for y := 0; y < targetH; y++ {
+				sy := (y * lh) / targetH
+				for x := 0; x < targetW; x++ {
+					sx := (x * lw) / targetW
+					r, g, bb2, a := logoImg.At(sx, sy).RGBA()
+					if a>>8 < 16 {
+						continue
+					}
+					canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
+						R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(bb2 >> 8), A: uint8(a >> 8),
+					})
+				}
+			}
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, canvas); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // fetchThumbnail downloads the user's profile photo for embedding in the
 // pass bundle. Best-effort — if it fails, the pass still generates but
 // without the thumbnail. The photo-cdn returns the source bytes; we pass
@@ -526,38 +630,20 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 		SecondaryFields: secondary,
 		BackFields:      back,
 	}
-	// Wallet layout per user choice.
-	switch c.WalletStyle {
-	case "boardingPass":
-		// Boarding-pass style — the biggest barcode Apple Wallet renders
-		// without NFC entitlement. The QR fills the lower portion of
-		// the pass at ~300pt × 300pt on iPhone (vs ~200pt for eventTicket).
-		pass.BoardingPass = &pkpass.BoardingPassStyle{
-			TransitType:     "PKTransitTypeGeneric",
-			PrimaryFields:   primary,
-			SecondaryFields: secondary,
-			BackFields:      back,
-		}
-	case "minimal":
-		// generic layout: small QR + just name. No secondary fields.
-		pass.Generic = &pkpass.Style{PrimaryFields: primary, BackFields: back}
-	case "posterQR", "posterPhoto", "posterBrand":
-		// iOS 18+ enhanced layout. PreferredStyleSchemes tells Wallet
-		// to try posterEventTicket first; older iOS falls back to
-		// the embedded eventTicket style below.
-		pass.PreferredStyleSchemes = []string{"posterEventTicket", "eventTicket"}
-		// posterEventTicket needs a relevantDates semantic for iOS 18
-		// to render the new layout. Use a stable far-future date so
-		// the pass never auto-archives.
-		pass.Semantics = map[string]any{
-			"eventName": c.Name,
-		}
-		pass.EventTicket = style
-	case "photoBack", "bigqr":
-		pass.EventTicket = style
-	default: // "compact" or empty
-		pass.EventTicket = style
+	// Add auxiliary fields populated from card data so the middle of the
+	// pass isn't empty. Apple shows up to 4 auxiliary fields in a row.
+	aux := []pkpass.Field{}
+	if len(c.Phones) > 0 {
+		aux = append(aux, pkpass.Field{Key: "phone", Label: "PHONE", Value: c.Phones[0]})
 	}
+	if len(c.Emails) > 0 {
+		aux = append(aux, pkpass.Field{Key: "email", Label: "EMAIL", Value: c.Emails[0]})
+	}
+	style.AuxiliaryFields = aux
+
+	// Single eventTicket layout for all wallet styles — the visual
+	// difference comes from the strip image, not the pass style.
+	pass.EventTicket = style
 	return pass
 }
 

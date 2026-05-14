@@ -147,10 +147,20 @@ func main() {
 
 		pass := buildPass(c, passTypeID, teamID, webBase)
 		assets := map[string][]byte{
-			"icon.png":    iconPNG(58, c.Template),  // 29pt @2x
-			"icon@2x.png": iconPNG(58, c.Template),
-			"logo.png":    iconPNG(160, c.Template),
-			"logo@2x.png": iconPNG(160, c.Template),
+			"icon.png":    iconPNG(58, c.Template, c.CustomColor),
+			"icon@2x.png": iconPNG(58, c.Template, c.CustomColor),
+			"logo.png":    iconPNG(160, c.Template, c.CustomColor),
+			"logo@2x.png": iconPNG(160, c.Template, c.CustomColor),
+		}
+		// Include user's profile photo as the pass thumbnail (shown
+		// prominently next to the primary field in EventTicket layout).
+		if c.PhotoURL != "" {
+			if thumb, err := fetchThumbnail(r.Context(), c.PhotoURL); err == nil && len(thumb) > 0 {
+				assets["thumbnail.png"] = thumb
+				assets["thumbnail@2x.png"] = thumb
+			} else if err != nil {
+				slog.Warn("thumbnail fetch failed", "err", err, "url", c.PhotoURL)
+			}
 		}
 
 		signMu.RLock()
@@ -189,6 +199,27 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutCtx)
+}
+
+// fetchThumbnail downloads the user's profile photo for embedding in the
+// pass bundle. Best-effort — if it fails, the pass still generates but
+// without the thumbnail. The photo-cdn returns the source bytes; we pass
+// them through (PNG container preferred for thumbnail.png filename, but
+// JPG inside a .png file works too — Wallet auto-detects).
+func fetchThumbnail(ctx context.Context, url string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		return nil, fmt.Errorf("photo-cdn %d", res.StatusCode)
+	}
+	// Cap at 500KB — Wallet rejects passes over ~640KB total.
+	return io.ReadAll(io.LimitReader(res.Body, 500*1024))
 }
 
 func fetchCard(ctx context.Context, apiBase, id, slug string) (*card, error) {
@@ -262,10 +293,9 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 			MessageEncoding: "iso-8859-1",
 			AltText:         strings.TrimSpace(c.Name),
 		}},
-		// StoreCard layout gives a much larger barcode area than Generic
-		// in Apple Wallet — the QR is roughly 2x as tall, which is what
-		// users actually need (a scannable QR, not field-padding).
-		StoreCard: &pkpass.Style{
+		// EventTicket places the barcode prominently in the center of
+		// the pass at a much larger size than Generic/StoreCard.
+		EventTicket: &pkpass.Style{
 			PrimaryFields:   primary,
 			SecondaryFields: secondary,
 			BackFields:      back,
@@ -334,19 +364,20 @@ func templateColors(template, customColor string) (bg, fg, lbl string) {
 // iconPNG returns a tiny solid-color PNG. Apple Wallet REQUIRES icon.png
 // and icon@2x.png even though we never display them next to a QR-only pass;
 // returning an empty file fails validation. v1 ships a brand-coloured square.
-func iconPNG(size int, template string) []byte {
+func iconPNG(size int, template, customColor string) []byte {
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 	bgHex := "#0B0B0F"
-	switch template {
-	case "gradient":
-		bgHex = "#1F2533"
-	case "glass":
-		bgHex = "#101012"
-	case "custom":
-		// Caller passes customColor via the c.CustomColor field; the icon
-		// rendering ignores it for now (icons are small thumbnails). The
-		// pass background uses the customColor properly via templateColors.
-		bgHex = "#0A66C2"
+	if customColor != "" {
+		bgHex = customColor
+	} else {
+		switch template {
+		case "gradient":
+			bgHex = "#1F2533"
+		case "glass":
+			bgHex = "#101012"
+		case "custom":
+			bgHex = "#0A66C2"
+		}
 	}
 	r, g, b := hexToRGB(bgHex)
 	c := color.NRGBA{R: r, G: g, B: b, A: 255}

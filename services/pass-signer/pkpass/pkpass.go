@@ -99,10 +99,11 @@ type Pass struct {
 	LabelColor         string    `json:"labelColor,omitempty"`
 	Barcodes           []Barcode `json:"barcodes,omitempty"`
 	// One of Generic / StoreCard / Coupon / EventTicket / BoardingPass.
-	// Different styles get different visual layouts in Wallet — StoreCard
-	// has a notably larger barcode area than Generic.
-	Generic   *Style `json:"generic,omitempty"`
-	StoreCard *Style `json:"storeCard,omitempty"`
+	// EventTicket has the most prominent center-of-pass barcode area —
+	// much larger than Generic or StoreCard which keep the barcode small.
+	Generic     *Style `json:"generic,omitempty"`
+	StoreCard   *Style `json:"storeCard,omitempty"`
+	EventTicket *Style `json:"eventTicket,omitempty"`
 }
 
 type Barcode struct {

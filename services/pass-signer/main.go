@@ -31,7 +31,62 @@ import (
 
 	"github.com/dynolabs-io/api/services/pass-signer/pkpass"
 	"github.com/dynolabs-io/api/shared/health"
+	qrcode "github.com/skip2/go-qrcode"
 )
+
+// renderQRPNG produces a QR code PNG at the requested dimensions with
+// padding. The QR is centered and high-contrast (black-on-white) so it
+// scans from across a room when used as the strip.png banner.
+func renderQRPNG(content string, w, h int) ([]byte, error) {
+	q, err := qrcode.New(content, qrcode.Medium)
+	if err != nil {
+		return nil, err
+	}
+	q.DisableBorder = true
+	// Apple strip image is fixed-aspect; render QR at min(w,h) then
+	// composite onto a white canvas of the requested dimensions.
+	size := h
+	if w < h {
+		size = w
+	}
+	// Apply some inner padding so the QR isn't flush to the strip edges.
+	qrSize := size - 60
+	if qrSize < 200 {
+		qrSize = size
+	}
+	qrPNG, err := q.PNG(qrSize)
+	if err != nil {
+		return nil, err
+	}
+	qrImg, _, err := image.Decode(bytes.NewReader(qrPNG))
+	if err != nil {
+		return nil, err
+	}
+	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
+	// White background
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			canvas.SetNRGBA(x, y, color.NRGBA{255, 255, 255, 255})
+		}
+	}
+	// Center the QR
+	ox := (w - qrImg.Bounds().Dx()) / 2
+	oy := (h - qrImg.Bounds().Dy()) / 2
+	bounds := qrImg.Bounds()
+	for y := 0; y < bounds.Dy(); y++ {
+		for x := 0; x < bounds.Dx(); x++ {
+			r, g, b, a := qrImg.At(x, y).RGBA()
+			canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
+				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
+			})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, canvas); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
 
 var version = "dev"
 
@@ -52,6 +107,7 @@ type card struct {
 	PhotoURL    string       `json:"photoUrl"`
 	Template    string       `json:"template"`
 	CustomColor string       `json:"customColor"`
+	WalletStyle string       `json:"walletStyle"` // compact | bigqr | photoBack | minimal
 }
 
 func main() {
@@ -158,8 +214,24 @@ func main() {
 			if thumb, err := fetchThumbnail(r.Context(), c.PhotoURL); err == nil && len(thumb) > 0 {
 				assets["thumbnail.png"] = thumb
 				assets["thumbnail@2x.png"] = thumb
+				// "photoBack" layout: also use the photo as the full
+				// pass background. Wallet renders it dimmed behind text.
+				if c.WalletStyle == "photoBack" {
+					assets["background.png"] = thumb
+					assets["background@2x.png"] = thumb
+				}
 			} else if err != nil {
 				slog.Warn("thumbnail fetch failed", "err", err, "url", c.PhotoURL)
+			}
+		}
+		// "bigqr" layout: render a large QR as the strip.png banner so
+		// the barcode dominates the pass visually. The standard tappable
+		// barcode at the bottom remains for actual scanning.
+		if c.WalletStyle == "bigqr" {
+			qrMsg := buildVCardText(c, webBase)
+			if stripPNG, err := renderQRPNG(qrMsg, 1125, 432); err == nil {
+				assets["strip.png"] = stripPNG
+				assets["strip@2x.png"] = stripPNG
 			}
 		}
 
@@ -276,7 +348,7 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 	// so they can also tap into the web page.
 	qrMsg := buildVCardText(c, webBase)
 
-	return pkpass.Pass{
+	pass := pkpass.Pass{
 		FormatVersion:      1,
 		PassTypeIdentifier: passTypeID,
 		SerialNumber:       c.Slug,
@@ -293,14 +365,29 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 			MessageEncoding: "iso-8859-1",
 			AltText:         strings.TrimSpace(c.Name),
 		}},
-		// EventTicket places the barcode prominently in the center of
-		// the pass at a much larger size than Generic/StoreCard.
-		EventTicket: &pkpass.Style{
-			PrimaryFields:   primary,
-			SecondaryFields: secondary,
-			BackFields:      back,
-		},
 	}
+	style := &pkpass.Style{
+		PrimaryFields:   primary,
+		SecondaryFields: secondary,
+		BackFields:      back,
+	}
+	// Wallet layout per user choice.
+	switch c.WalletStyle {
+	case "minimal":
+		// generic layout: small QR + just name. No secondary fields.
+		minimal := &pkpass.Style{PrimaryFields: primary, BackFields: back}
+		pass.Generic = minimal
+	case "photoBack":
+		// eventTicket with photo as the background (assets["background.png"]
+		// is set by the handler). Fields ride over the photo.
+		pass.EventTicket = style
+	case "bigqr":
+		// eventTicket with huge QR rendered as strip.png in the handler.
+		pass.EventTicket = style
+	default: // "compact" or empty
+		pass.EventTicket = style
+	}
+	return pass
 }
 
 // buildVCardText serializes a vCard 3.0 string identical to the mobile

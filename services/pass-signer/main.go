@@ -103,7 +103,6 @@ type card struct {
 	BrandLogoURL string       `json:"brandLogoUrl"`
 	Template     string       `json:"template"`
 	CustomColor  string       `json:"customColor"`
-	WalletStyle  string       `json:"walletStyle"` // photoStrip | logoStrip
 }
 
 func main() {
@@ -189,32 +188,25 @@ func main() {
 			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err), http.StatusBadGateway)
 			return
 		}
-		// ?style= query param overrides the card's saved wallet_style for
-		// this request only. Useful for previewing all layouts without
-		// editing the card.
-		if styleOverride := r.URL.Query().Get("style"); styleOverride != "" {
-			c.WalletStyle = styleOverride
-		}
-		// Log every pass build with the slug requested and the name that
-		// will appear in the pass. This is how we diagnose "wallet shows
-		// wrong card" — proves which card the app actually asked for.
 		slog.Info("pass requested",
 			"slug-requested", slug, "cardId-requested", cardID,
 			"name-served", c.Name, "slug-served", c.Slug,
+			"hasPhoto", c.PhotoURL != "",
+			"hasLogo", c.BrandLogoURL != "",
 			"ua", r.UserAgent())
 
 		pass := buildPass(c, passTypeID, teamID, webBase)
 
 		// Fetch brand logo + profile photo once.
 		var brandLogoBytes, photoBytes []byte
-		if c.BrandLogoURL != "" {
+		if c.BrandLogoURL != "" && strings.HasPrefix(c.BrandLogoURL, "http") {
 			if b, err := fetchThumbnail(r.Context(), c.BrandLogoURL); err == nil && len(b) > 0 {
 				brandLogoBytes = b
 			} else if err != nil {
 				slog.Warn("brand logo fetch failed", "err", err, "url", c.BrandLogoURL)
 			}
 		}
-		if c.PhotoURL != "" {
+		if c.PhotoURL != "" && strings.HasPrefix(c.PhotoURL, "http") {
 			if p, err := fetchThumbnail(r.Context(), c.PhotoURL); err == nil && len(p) > 0 {
 				photoBytes = p
 			} else if err != nil {
@@ -222,27 +214,13 @@ func main() {
 			}
 		}
 
-		// Icon + logo: the user's brand logo if uploaded, else a
-		// brand-color tile (same as before). The brand logo gives the
-		// pass an identity in Wallet's lock-screen icon strip.
-		var iconAsset, logoAsset []byte
-		if len(brandLogoBytes) > 0 {
-			// Apple wants square icon (29pt @2x = 58px, @3x = 87px) and
-			// rectangular logo (max 160pt × 50pt @2x = 320×100, @3x = 480×150).
-			// Resize the brand logo for each.
-			if ic, err := resizeSquare(brandLogoBytes, 87); err == nil {
-				iconAsset = ic
-			}
-			if lg, err := fitToCanvasTransparent(brandLogoBytes, 480, 150); err == nil {
-				logoAsset = lg
-			}
-		}
-		if iconAsset == nil {
-			iconAsset = iconPNG(87, c.Template, c.CustomColor)
-		}
-		if logoAsset == nil {
-			logoAsset = iconPNG(160, c.Template, c.CustomColor)
-		}
+		// Apple's "logo" header slot (top-left, beside logoText) is a
+		// small decorative chip. We keep it as a brand-colored tile so the
+		// company logo doesn't get squished into 160×50 — it gets the full
+		// strip width below. icon is also brand-colored for the lock-screen
+		// notification.
+		iconAsset := iconPNG(87, c.Template, c.CustomColor)
+		logoAsset := iconPNG(160, c.Template, c.CustomColor)
 		assets := map[string][]byte{
 			"icon.png":    iconAsset,
 			"icon@2x.png": iconAsset,
@@ -251,40 +229,13 @@ func main() {
 			"logo@2x.png": logoAsset,
 		}
 
-		// Strip image fills the top ~25% of the pass front, full width.
-		// Two named styles: photoStrip (profile photo) | logoStrip (brand bg + logo).
-		// Any other (or empty) value falls back to photoStrip if a photo
-		// exists, else logoStrip — so legacy DB values don't produce blank passes.
-		strip := c.WalletStyle
-		if strip != "photoStrip" && strip != "logoStrip" {
-			if len(photoBytes) > 0 {
-				strip = "photoStrip"
-			} else {
-				strip = "logoStrip"
-			}
-		}
-		if strip == "photoStrip" && len(photoBytes) == 0 {
-			strip = "logoStrip"
-		}
-		switch strip {
-		case "photoStrip":
-			if s, err := fitToCanvas(photoBytes, 1125, 432); err == nil {
-				assets["strip.png"] = s
-				assets["strip@2x.png"] = s
-			}
-		case "logoStrip":
-			if s, err := renderLogoStrip(c, brandLogoBytes, 1125, 432); err == nil {
-				assets["strip.png"] = s
-				assets["strip@2x.png"] = s
-			}
-		}
-		// Thumbnail also gets the profile photo so it shows in lock-screen
-		// notifications alongside the icon.
-		if len(photoBytes) > 0 {
-			if t, err := resizeSquare(photoBytes, 180); err == nil {
-				assets["thumbnail.png"] = t
-				assets["thumbnail@2x.png"] = t
-			}
+		// The strip is the ONE composite image. It always packs both the
+		// face photo AND the company logo on a brand-color background so
+		// every pass uses the full canvas — no more empty space, no more
+		// either/or.
+		if s, err := renderHeroStrip(c, photoBytes, brandLogoBytes, 1125, 432); err == nil {
+			assets["strip.png"] = s
+			assets["strip@2x.png"] = s
 		}
 
 		signMu.RLock()
@@ -367,62 +318,79 @@ func fitToCanvas(src []byte, w, h int) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// renderBrandedArtwork composes a branded image: brand-color background
-// with a circular profile photo top-center and the company name at bottom
-// in large text. Used by walletStyle=posterBrand.
-func renderBrandedArtwork(c *card, photoBytes []byte, w, h int) ([]byte, error) {
-	// Background color
-	bgHex := "#0B0B0F"
+// brandColorHex returns the brand color for a card. customColor wins,
+// otherwise the template provides a default.
+func brandColorHex(c *card) string {
 	if c.CustomColor != "" {
-		bgHex = c.CustomColor
+		return c.CustomColor
 	}
-	br, bg, bb := hexToRGB(bgHex)
+	switch c.Template {
+	case "gradient":
+		return "#1F2533"
+	case "glass":
+		return "#101012"
+	case "custom":
+		return "#0A66C2"
+	}
+	return "#0B0B0F"
+}
+
+// renderHeroStrip composes the front banner of the Wallet pass. The strip
+// is 1125×432 (the largest Apple slot for eventTicket) and ALWAYS uses the
+// full canvas — no empty space.
+//
+// Layout adapts to whatever the user uploaded:
+//
+//   photo + logo → photo as a left-anchored circle, logo on the right half
+//                  centered on the brand color band. Both visible at once.
+//   photo only   → photo cover-cropped to the full strip + brand-color
+//                  vignette on the right edge (keeps face anchored left).
+//   logo only    → logo centered on full brand-color background, sized to
+//                  ~70% of canvas height.
+//   neither      → solid brand color (lets the Apple-rendered text fields
+//                  fill what would otherwise be a void).
+func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, error) {
+	br, bg, bb := hexToRGB(brandColorHex(c))
 	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			canvas.SetNRGBA(x, y, color.NRGBA{R: br, G: bg, B: bb, A: 255})
 		}
 	}
-	// Circular photo at top-center (occupying ~40% of canvas height)
-	if len(photoBytes) > 0 {
-		photoSize := h * 4 / 10
-		if photoSize > w*7/10 {
-			photoSize = w * 7 / 10
+
+	hasPhoto := len(photoBytes) > 0
+	hasLogo := len(logoBytes) > 0
+
+	switch {
+	case hasPhoto && hasLogo:
+		// SPLIT LAYOUT — photo circle anchored left, logo right.
+		// Photo circle ~ 360px diameter, vertically centered, 36px from left.
+		photoDiam := h * 90 / 100 // 388
+		if photoDiam > w*38/100 {
+			photoDiam = w * 38 / 100
 		}
-		photoImg, _, err := image.Decode(bytes.NewReader(photoBytes))
-		if err == nil {
-			// Crop to square first
-			sw, sh := photoImg.Bounds().Dx(), photoImg.Bounds().Dy()
-			sz := sw
-			if sh < sw {
-				sz = sh
-			}
-			sx0 := (sw - sz) / 2
-			sy0 := (sh - sz) / 2
-			ox := (w - photoSize) / 2
-			oy := h*15/100
-			radius := photoSize / 2
-			cx := ox + radius
-			cy := oy + radius
-			for y := 0; y < photoSize; y++ {
-				for x := 0; x < photoSize; x++ {
-					dx := (ox + x) - cx
-					dy := (oy + y) - cy
-					if dx*dx+dy*dy > radius*radius {
-						continue // outside circle
-					}
-					sx := sx0 + (x*sz)/photoSize
-					sy := sy0 + (y*sz)/photoSize
-					r, g, b, a := photoImg.At(sx, sy).RGBA()
-					canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
-						R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
-					})
-				}
-			}
-		}
+		photoOX := h * 5 / 100 // 21px left margin
+		photoOY := (h - photoDiam) / 2
+		drawCircularPhoto(canvas, photoBytes, photoOX, photoOY, photoDiam)
+		// Logo in the right ~58% of canvas (from photo right edge to right).
+		logoBoxX := photoOX + photoDiam + h*8/100
+		logoBoxW := w - logoBoxX - h*5/100
+		logoBoxH := h * 80 / 100
+		logoBoxY := (h - logoBoxH) / 2
+		drawLogoFit(canvas, logoBytes, logoBoxX, logoBoxY, logoBoxW, logoBoxH)
+	case hasPhoto:
+		// PHOTO-DOMINANT — cover-crop fit. Apple's pass already has a brand
+		// color background, so we let the photo own the strip.
+		coverDrawPhoto(canvas, photoBytes, 0, 0, w, h)
+	case hasLogo:
+		// LOGO-CENTERED — fits ~70% of canvas height, max 80% width.
+		boxH := h * 70 / 100
+		boxW := w * 80 / 100
+		drawLogoFit(canvas, logoBytes, (w-boxW)/2, (h-boxH)/2, boxW, boxH)
+	default:
+		// Plain brand color — Apple's text overlay handles content.
 	}
-	// We could draw text here but Go's stdlib font rendering is limited.
-	// Leaving text to Apple's pass.json field overlay is cleaner.
+
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, canvas); err != nil {
 		return nil, err
@@ -430,105 +398,120 @@ func renderBrandedArtwork(c *card, photoBytes []byte, w, h int) ([]byte, error) 
 	return buf.Bytes(), nil
 }
 
-// resizeSquare crops to a centered square then resizes to size×size.
-func resizeSquare(src []byte, size int) ([]byte, error) {
-	return fitToCanvas(src, size, size)
+// drawCircularPhoto draws a center-cover-cropped photo inside a circle at
+// (ox, oy) with the given diameter. Pixels outside the circle are left
+// untouched so the underlying brand color shows through.
+func drawCircularPhoto(canvas *image.NRGBA, photoBytes []byte, ox, oy, diam int) {
+	photoImg, _, err := image.Decode(bytes.NewReader(photoBytes))
+	if err != nil {
+		return
+	}
+	sw, sh := photoImg.Bounds().Dx(), photoImg.Bounds().Dy()
+	sz := sw
+	if sh < sw {
+		sz = sh
+	}
+	sx0 := (sw - sz) / 2
+	sy0 := (sh - sz) / 2
+	radius := diam / 2
+	cx := ox + radius
+	cy := oy + radius
+	r2 := radius * radius
+	// Draw a thin white ring (4px) just inside the radius to make the photo
+	// pop against the brand color.
+	ringInner := radius - 4
+	ringInner2 := ringInner * ringInner
+	for y := 0; y < diam; y++ {
+		for x := 0; x < diam; x++ {
+			dx := (ox + x) - cx
+			dy := (oy + y) - cy
+			d2 := dx*dx + dy*dy
+			if d2 > r2 {
+				continue
+			}
+			if d2 >= ringInner2 {
+				canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+				continue
+			}
+			sx := sx0 + (x*sz)/diam
+			sy := sy0 + (y*sz)/diam
+			r, g, b, a := photoImg.At(sx, sy).RGBA()
+			canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
+				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
+			})
+		}
+	}
 }
 
-// fitToCanvasTransparent resizes src to fit INSIDE w×h preserving aspect
-// (no crop) and centers it on a transparent canvas. Used for the brand
-// logo where we don't want to distort wide/short logos.
-func fitToCanvasTransparent(src []byte, w, h int) ([]byte, error) {
-	srcImg, _, err := image.Decode(bytes.NewReader(src))
+// drawLogoFit fits the logo bytes inside (ox, oy, w, h) preserving aspect.
+// Transparent pixels (a < 16) are skipped so the brand color underneath
+// shows through — required for typical PNG logos.
+func drawLogoFit(canvas *image.NRGBA, logoBytes []byte, ox, oy, w, h int) {
+	logoImg, _, err := image.Decode(bytes.NewReader(logoBytes))
 	if err != nil {
-		return nil, err
+		return
 	}
-	sw, sh := srcImg.Bounds().Dx(), srcImg.Bounds().Dy()
-	srcRatio := float64(sw) / float64(sh)
+	lw, lh := logoImg.Bounds().Dx(), logoImg.Bounds().Dy()
+	if lw == 0 || lh == 0 {
+		return
+	}
+	srcRatio := float64(lw) / float64(lh)
 	dstRatio := float64(w) / float64(h)
 	var contentW, contentH int
 	if srcRatio > dstRatio {
-		// Logo is wider than canvas — fit by width
 		contentW = w
 		contentH = int(float64(w) / srcRatio)
 	} else {
 		contentH = h
 		contentW = int(float64(h) * srcRatio)
 	}
-	ox := (w - contentW) / 2
-	oy := (h - contentH) / 2
-	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
+	px := ox + (w-contentW)/2
+	py := oy + (h-contentH)/2
 	for y := 0; y < contentH; y++ {
-		sy := (y * sh) / contentH
+		sy := (y * lh) / contentH
 		for x := 0; x < contentW; x++ {
-			sx := (x * sw) / contentW
+			sx := (x * lw) / contentW
+			r, g, b, a := logoImg.At(sx, sy).RGBA()
+			if a>>8 < 16 {
+				continue
+			}
+			canvas.SetNRGBA(px+x, py+y, color.NRGBA{
+				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
+			})
+		}
+	}
+}
+
+// coverDrawPhoto blits a center-cover-cropped photo onto canvas at (ox, oy,
+// w, h). The photo fills the rectangle exactly, cropping the longer axis.
+func coverDrawPhoto(canvas *image.NRGBA, photoBytes []byte, ox, oy, w, h int) {
+	srcImg, _, err := image.Decode(bytes.NewReader(photoBytes))
+	if err != nil {
+		return
+	}
+	sw, sh := srcImg.Bounds().Dx(), srcImg.Bounds().Dy()
+	srcRatio := float64(sw) / float64(sh)
+	dstRatio := float64(w) / float64(h)
+	var cropW, cropH int
+	if srcRatio > dstRatio {
+		cropH = sh
+		cropW = int(float64(sh) * dstRatio)
+	} else {
+		cropW = sw
+		cropH = int(float64(sw) / dstRatio)
+	}
+	cropX := (sw - cropW) / 2
+	cropY := (sh - cropH) / 2
+	for y := 0; y < h; y++ {
+		sy := cropY + (y*cropH)/h
+		for x := 0; x < w; x++ {
+			sx := cropX + (x*cropW)/w
 			r, g, b, a := srcImg.At(sx, sy).RGBA()
 			canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
 				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
 			})
 		}
 	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, canvas); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-// renderLogoStrip composes the brand color as background + the brand
-// logo (if available) centered. Used for walletStyle=logoStrip.
-func renderLogoStrip(c *card, logoBytes []byte, w, h int) ([]byte, error) {
-	bgHex := "#0B0B0F"
-	if c.CustomColor != "" {
-		bgHex = c.CustomColor
-	} else {
-		switch c.Template {
-		case "gradient":
-			bgHex = "#1F2533"
-		case "glass":
-			bgHex = "#101012"
-		}
-	}
-	br, bg, bb := hexToRGB(bgHex)
-	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
-			canvas.SetNRGBA(x, y, color.NRGBA{R: br, G: bg, B: bb, A: 255})
-		}
-	}
-	// Place logo centered, occupying ~70% of strip height
-	if len(logoBytes) > 0 {
-		logoImg, _, err := image.Decode(bytes.NewReader(logoBytes))
-		if err == nil {
-			targetH := h * 70 / 100
-			lw, lh := logoImg.Bounds().Dx(), logoImg.Bounds().Dy()
-			targetW := lw * targetH / lh
-			if targetW > w*80/100 {
-				targetW = w * 80 / 100
-				targetH = lh * targetW / lw
-			}
-			ox := (w - targetW) / 2
-			oy := (h - targetH) / 2
-			for y := 0; y < targetH; y++ {
-				sy := (y * lh) / targetH
-				for x := 0; x < targetW; x++ {
-					sx := (x * lw) / targetW
-					r, g, bb2, a := logoImg.At(sx, sy).RGBA()
-					if a>>8 < 16 {
-						continue
-					}
-					canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
-						R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(bb2 >> 8), A: uint8(a >> 8),
-					})
-				}
-			}
-		}
-	}
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, canvas); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }
 
 // fetchThumbnail downloads the user's profile photo for embedding in the

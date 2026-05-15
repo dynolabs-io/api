@@ -14,12 +14,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
-	_ "image/gif"  // register GIF decoder for image.Decode
-	_ "image/jpeg" // register JPEG decoder — photo-cdn returns JPEGs
+	_ "image/gif" // register GIF decoder for image.Decode
+	"image/jpeg" // encoder/decoder — photo-cdn returns JPEGs; we also re-encode for the .vcf embed
 	"image/png"
 	"io"
 	"log/slog"
@@ -114,6 +115,11 @@ func main() {
 	passTypeID := getenv("APPLE_PASS_TYPE_ID", "pass.io.dynolabs.vcard")
 	teamID := getenv("APPLE_TEAM_ID", "77GHJHUGD4")
 	webBase := getenv("WEB_BASE", "https://dynolabs.io")
+	// Public URL base for the .vcf endpoint that the online-mode QR
+	// resolves to. The recipient's iPhone fetches this URL when they tap
+	// the URL in the iOS Camera preview; the server returns a vCard with
+	// the full-resolution photo embedded. Defaults to the production host.
+	vcfURLBase := getenv("VCARD_URL_BASE", "https://api.dynolabs.io")
 	certPath := getenv("APPLE_PASS_CERT_PATH", "/etc/dynolabs-apple-pass/passcert.pem")
 	keyPath := getenv("APPLE_PASS_KEY_PATH", "/etc/dynolabs-apple-pass/passkey.pem")
 	wwdrPath := getenv("APPLE_PASS_WWDR_PATH", "/etc/dynolabs-apple-pass/wwdr.pem")
@@ -161,20 +167,32 @@ func main() {
 			http.Error(w, `{"error":"stub-mode: Apple Pass Type ID cert not yet provisioned"}`, http.StatusServiceUnavailable)
 			return
 		}
-		var cardID, slug string
+		var cardID, slug, mode string
 		if r.Method == http.MethodGet {
 			cardID = r.URL.Query().Get("cardId")
 			slug = r.URL.Query().Get("slug")
+			mode = r.URL.Query().Get("mode")
 		} else {
 			var body struct {
 				CardID string `json:"cardId"`
 				Slug   string `json:"slug"`
+				Mode   string `json:"mode"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 				return
 			}
-			cardID, slug = body.CardID, body.Slug
+			cardID, slug, mode = body.CardID, body.Slug, body.Mode
+		}
+		// Mode = "offline" or "online" (default).
+		//   online  → QR contains only the .vcf URL. Recipient online →
+		//             Safari loads .vcf → contact saves with FULL-RES photo.
+		//   offline → QR contains the full vCard text minus PHOTO.
+		//             Recipient saves the basic contact instantly, no network.
+		// Each mode gets a distinct pass serial + description so they can
+		// coexist in Wallet without collision.
+		if mode != "offline" {
+			mode = "online"
 		}
 		if cardID == "" && slug == "" {
 			http.Error(w, `{"error":"cardId or slug required"}`, http.StatusBadRequest)
@@ -191,6 +209,7 @@ func main() {
 		slog.Info("pass requested",
 			"slug-requested", slug, "cardId-requested", cardID,
 			"name-served", c.Name, "slug-served", c.Slug,
+			"mode", mode,
 			"hasPhoto", c.PhotoURL != "",
 			"hasLogo", c.BrandLogoURL != "",
 			"ua", r.UserAgent())
@@ -214,7 +233,7 @@ func main() {
 			}
 		}
 
-		pass := buildPass(c, passTypeID, teamID, webBase)
+		pass := buildPass(c, passTypeID, teamID, webBase, vcfURLBase, mode)
 
 		// Apple's "logo" header slot (top-left, beside logoText) is a
 		// small decorative chip. We keep it as a brand-colored tile so the
@@ -254,6 +273,54 @@ func main() {
 	}
 	mux.HandleFunc("GET /pass/apple", applePass)
 	mux.HandleFunc("POST /pass/apple", applePass)
+
+	// /v/<slug>.vcf — serves a vCard 3.0 file with the FULL-RESOLUTION
+	// photo embedded as base64. The online-mode QR resolves to this URL;
+	// the recipient's Safari downloads the .vcf, iOS shows the Contact
+	// Card sheet, "Add to Contacts" saves the contact WITH the photo.
+	//
+	// This is the only path that delivers a high-res photo to a saved
+	// iOS contact via QR scan — iOS Camera deliberately won't fetch
+	// PHOTO;VALUE=URI references at save time, so we route through Safari
+	// (which is an explicit network action by the user, allowed).
+	mux.HandleFunc("GET /v/{slug}.vcf", func(w http.ResponseWriter, r *http.Request) {
+		slug := r.PathValue("slug")
+		if slug == "" {
+			http.Error(w, "slug required", http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		c, err := fetchCard(ctx, apiBase, "", slug)
+		if err != nil {
+			slog.Warn("vcf fetch card failed", "err", err, "slug", slug, "ua", r.UserAgent())
+			http.Error(w, "card not found", http.StatusNotFound)
+			return
+		}
+		// Fetch + re-encode the photo to a sensible size. 512×512 q70 ≈
+		// 25 KB — looks crisp on iPhone contact detail (120pt @ 3x = 360
+		// pixels rendered), and the .vcf response is still tiny by web
+		// standards.
+		var photoEmbed []byte
+		if c.PhotoURL != "" && strings.HasPrefix(c.PhotoURL, "http") {
+			if raw, err := fetchThumbnail(r.Context(), c.PhotoURL); err == nil && len(raw) > 0 {
+				if enc, err := reencodeJPEG(raw, 512, 70); err == nil {
+					photoEmbed = enc
+				} else {
+					slog.Warn("vcf photo reencode failed", "err", err)
+				}
+			} else if err != nil {
+				slog.Warn("vcf photo fetch failed", "err", err, "url", c.PhotoURL)
+			}
+		}
+		body := buildVCardWithEmbeddedPhoto(c, webBase, photoEmbed)
+		w.Header().Set("Content-Type", "text/vcard; charset=utf-8")
+		w.Header().Set("Content-Disposition",
+			fmt.Sprintf(`attachment; filename="%s.vcf"`, sanitizeFilename(c.Name)))
+		w.Header().Set("Cache-Control", "private, max-age=60")
+		_, _ = w.Write([]byte(body))
+		slog.Info("vcf served", "slug", slug, "name", c.Name, "hasPhoto", len(photoEmbed) > 0, "bytes", len(body))
+	})
 
 	mux.HandleFunc("POST /pass/google", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"stub-mode: Google Wallet issuer not yet provisioned"}`, http.StatusServiceUnavailable)
@@ -561,7 +628,7 @@ func fetchCard(ctx context.Context, apiBase, id, slug string) (*card, error) {
 	return &c, nil
 }
 
-func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
+func buildPass(c *card, passTypeID, teamID, webBase, vcfURLBase, mode string) pkpass.Pass {
 	bg, fg, lbl := templateColors(c.Template, c.CustomColor)
 
 	// Layout decisions, by region:
@@ -608,17 +675,36 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 		back = append(back, pkpass.Field{Key: "profile", Label: "Profile", Value: webBase + "/c/" + c.Slug})
 	}
 
-	// vCard payload — URL-only PHOTO reference (no embed). See
-	// buildVCardText comment for the trade-off.
-	qrMsg := buildVCardText(c, webBase)
+	// QR payload depends on mode:
+	//   online  → just the .vcf URL. The recipient's Safari fetches it
+	//             and iOS Contacts imports the vCard (with the full-res
+	//             embedded photo) — guaranteed working when online.
+	//   offline → vCard text with NO PHOTO line. iOS Camera saves the
+	//             contact instantly, no network needed. No photo on the
+	//             saved contact (Apple won't fetch URIs and we don't
+	//             embed bytes to keep the QR scannable).
+	var qrMsg string
+	if mode == "online" {
+		qrMsg = vcfURLBase + "/v/" + c.Slug + ".vcf"
+	} else {
+		qrMsg = buildVCardText(c, webBase)
+	}
+
+	// Serial + description must differ per mode so both passes can live
+	// in Apple Wallet at the same time. Apple Wallet dedupes by
+	// (passTypeIdentifier, serialNumber).
+	modeLabel := "Offline (basic)"
+	if mode == "online" {
+		modeLabel = "Online (rich)"
+	}
 
 	pass := pkpass.Pass{
 		FormatVersion:      1,
 		PassTypeIdentifier: passTypeID,
-		SerialNumber:       c.Slug,
+		SerialNumber:       c.Slug + "-" + mode,
 		TeamIdentifier:     teamID,
 		OrganizationName:   "Dynolabs",
-		Description:        "Dynolabs vCard — " + c.Name,
+		Description:        "Dynolabs vCard — " + c.Name + " · " + modeLabel,
 		// No LogoText — keeps header area clean. Apple still shows the
 		// logo.png tile on the left.
 		ForegroundColor: fg,
@@ -646,23 +732,18 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 	return pass
 }
 
-// buildVCardText serializes a vCard 3.0 string for the QR payload.
+// buildVCardText serializes the OFFLINE-mode vCard 3.0 string.
 //
-// Design choices (founder decision after the Build 109 round-trip):
+//   • N (structured name) — iOS Camera uses N for the saved contact name
+//     (fallback to ORG would name the contact "Dynolabs").
+//   • URLs carry TYPE=WORK so iOS labels them "work" not "homepage".
+//   • NO PHOTO line: iOS Camera does not fetch remote URIs from a scanned
+//     QR (verified — gets initials avatar), and embedding base64 here
+//     would make the QR unreadable. Offline mode is text-only by design.
+//     For photo-on-save, use the online-mode QR which resolves to the
+//     /v/<slug>.vcf endpoint (full-res embedded photo via HTTP).
 //
-//   • N (structured name) is emitted so iOS Camera saves the contact
-//     with the person's name. Without N, iOS Camera falls back to ORG
-//     and the saved contact would be named "Dynolabs".
-//   • Profile + social URLs carry TYPE=WORK so iOS Contacts labels
-//     them "work" instead of the default "homepage".
-//   • PHOTO is a REMOTE URI reference (PHOTO;VALUE=URI:<url>). We do
-//     NOT embed base64. Embedding worked but inflated the QR by ~1.5 KB
-//     and made the modules dense enough that a standard phone camera
-//     could not scan from arm's length. The URL is stripped of any
-//     ?v= cache-bust query — strict vCard parsers (including iOS 17+
-//     Camera) reject URLs with query strings or treat them as untrusted.
-//   • The mobile client's lib/vcard.ts produces a byte-identical string
-//     so the in-app QR and the Wallet QR are interchangeable.
+// Byte-identical to the mobile client's lib/vcard.ts offline output.
 func buildVCardText(c *card, webBase string) string {
 	var sb strings.Builder
 	sb.WriteString("BEGIN:VCARD\r\n")
@@ -688,21 +769,85 @@ func buildVCardText(c *card, webBase string) string {
 	if c.Slug != "" {
 		sb.WriteString("URL;TYPE=WORK:" + escapeVCard(webBase+"/c/"+c.Slug) + "\r\n")
 	}
-	if c.PhotoURL != "" {
-		sb.WriteString("PHOTO;VALUE=URI:" + stripQuery(c.PhotoURL) + "\r\n")
+	sb.WriteString("END:VCARD\r\n")
+	return sb.String()
+}
+
+// buildVCardWithEmbeddedPhoto returns a vCard 3.0 string with the
+// profile photo embedded as base64 JPEG. This is what the /v/<slug>.vcf
+// endpoint returns: the recipient's iOS Contacts imports it via Safari,
+// so the QR-density constraint that forced offline-mode to drop PHOTO
+// does NOT apply here — we can include the full-resolution image.
+//
+// Lines exceeding 75 octets are folded per RFC 2425 §5.8.1 (continuation
+// lines start with a single space) so iOS's vCard parser accepts the
+// embedded photo regardless of size.
+func buildVCardWithEmbeddedPhoto(c *card, webBase string, photoBytes []byte) string {
+	base := strings.TrimSuffix(buildVCardText(c, webBase), "END:VCARD\r\n")
+	var sb strings.Builder
+	sb.WriteString(base)
+	if len(photoBytes) > 0 {
+		b64 := base64.StdEncoding.EncodeToString(photoBytes)
+		sb.WriteString(foldVCardLine("PHOTO;ENCODING=b;TYPE=JPEG:" + b64))
 	}
 	sb.WriteString("END:VCARD\r\n")
 	return sb.String()
 }
 
-// stripQuery removes the query string from a URL (defensive — our upload
-// step appends ?v=<ts> for cache-busting, but vCard parsers can choke
-// on query strings in PHOTO URIs).
-func stripQuery(u string) string {
-	if i := strings.IndexByte(u, '?'); i >= 0 {
-		return u[:i]
+// foldVCardLine folds a long property line per RFC 2425 §5.8.1.
+func foldVCardLine(line string) string {
+	const max = 75
+	if len(line) <= max {
+		return line + "\r\n"
 	}
-	return u
+	var b strings.Builder
+	b.Grow(len(line) + len(line)/max*3)
+	for i := 0; i < len(line); i += max {
+		end := i + max
+		if end > len(line) {
+			end = len(line)
+		}
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(line[i:end])
+		b.WriteString("\r\n")
+	}
+	return b.String()
+}
+
+// reencodeJPEG decodes any image (jpeg/png/gif), center-crops to a
+// square at `size` pixels, and re-encodes as JPEG at the given quality.
+// Used by the /v/<slug>.vcf endpoint to size the embedded photo
+// appropriately — full-res on contact detail but not multi-MB.
+func reencodeJPEG(src []byte, size int, quality int) ([]byte, error) {
+	srcImg, _, err := image.Decode(bytes.NewReader(src))
+	if err != nil {
+		return nil, err
+	}
+	sw, sh := srcImg.Bounds().Dx(), srcImg.Bounds().Dy()
+	sz := sw
+	if sh < sw {
+		sz = sh
+	}
+	sx0 := (sw - sz) / 2
+	sy0 := (sh - sz) / 2
+	dst := image.NewNRGBA(image.Rect(0, 0, size, size))
+	for y := 0; y < size; y++ {
+		sy := sy0 + (y*sz)/size
+		for x := 0; x < size; x++ {
+			sx := sx0 + (x*sz)/size
+			r, g, b, a := srcImg.At(sx, sy).RGBA()
+			dst.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
+			})
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: quality}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // splitName splits "First Middle Last" into ("Last", "First Middle").
@@ -717,6 +862,28 @@ func splitName(full string) (last, first string) {
 		return "", full
 	}
 	return full[idx+1:], strings.TrimSpace(full[:idx])
+}
+
+// sanitizeFilename produces a safe Content-Disposition filename from a
+// person's name (no slashes, no quotes, fallback to "card").
+func sanitizeFilename(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "card"
+	}
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == ' ', r == '-', r == '_':
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "card"
+	}
+	return b.String()
 }
 
 func escapeVCard(s string) string {

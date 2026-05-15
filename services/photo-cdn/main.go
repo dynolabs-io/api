@@ -157,10 +157,17 @@ func main() {
 }
 
 func validSlug(s string) bool {
-	if len(s) < 4 || len(s) > 16 {
+	// Slugs are server-issued base32-like strings. We also accept a
+	// "<slug>-brand" suffix for brand-logo uploads — same security
+	// model (no traversal, no shell metachars), one optional dash.
+	base := s
+	if strings.HasSuffix(s, "-brand") {
+		base = strings.TrimSuffix(s, "-brand")
+	}
+	if len(base) < 4 || len(base) > 16 {
 		return false
 	}
-	for _, c := range s {
+	for _, c := range base {
 		if !((c >= 'a' && c <= 'z') || (c >= '2' && c <= '9')) {
 			return false
 		}

@@ -283,7 +283,12 @@ func main() {
 	// iOS contact via QR scan — iOS Camera deliberately won't fetch
 	// PHOTO;VALUE=URI references at save time, so we route through Safari
 	// (which is an explicit network action by the user, allowed).
-	mux.HandleFunc("GET /v/{slug}.vcf", func(w http.ResponseWriter, r *http.Request) {
+	// /v/{slug} serves the vCard. We don't put .vcf in the URL because
+	// Go 1.22's ServeMux pattern wildcards must own the entire path
+	// segment — `{slug}.vcf` is rejected. Safari recognises the response
+	// as a vCard from the `Content-Type: text/vcard` header alone (the
+	// filename comes from Content-Disposition).
+	mux.HandleFunc("GET /v/{slug}", func(w http.ResponseWriter, r *http.Request) {
 		slug := r.PathValue("slug")
 		if slug == "" {
 			http.Error(w, "slug required", http.StatusBadRequest)

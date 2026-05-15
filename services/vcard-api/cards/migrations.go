@@ -32,6 +32,18 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		`CREATE INDEX IF NOT EXISTS cards_device_idx ON cards(device_id)`,
 		`ALTER TABLE cards ADD COLUMN IF NOT EXISTS wallet_style TEXT`,
 		`ALTER TABLE cards ADD COLUMN IF NOT EXISTS brand_logo_url TEXT`,
+		// Optional Apple-Sign-In account ownership. user_id NULL = the
+		// card is anonymous, device-bound (legacy & first-launch path).
+		// user_id SET = the card syncs across all the user's devices.
+		`CREATE TABLE IF NOT EXISTS users (
+			id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			apple_sub   TEXT UNIQUE NOT NULL,
+			name        TEXT,
+			email       TEXT,
+			created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`ALTER TABLE cards ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE SET NULL`,
+		`CREATE INDEX IF NOT EXISTS cards_user_idx ON cards(user_id)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

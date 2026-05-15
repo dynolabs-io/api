@@ -26,6 +26,7 @@ type Card struct {
 	CustomColor  string `json:"customColor,omitempty"`
 	WalletStyle  string `json:"walletStyle,omitempty"`
 	DeviceID    string    `json:"deviceId,omitempty"`
+	UserID      string    `json:"userId,omitempty"` // set when the card is attached to a signed-in user
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
 }

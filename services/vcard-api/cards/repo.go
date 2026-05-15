@@ -88,6 +88,104 @@ func (r *Repo) ListByDevice(ctx context.Context, deviceID string) ([]Card, error
 	return out, rows.Err()
 }
 
+// ListByUser returns all cards attached to the given user_id (regardless
+// of which device created them). Used by the mobile app on launch when
+// the user is signed in.
+func (r *Repo) ListByUser(ctx context.Context, userID string) ([]Card, error) {
+	const q = baseSelect + ` WHERE user_id = $1 ORDER BY created_at DESC`
+	rows, err := r.db.QueryContext(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list by user: %w", err)
+	}
+	defer rows.Close()
+	var out []Card
+	for rows.Next() {
+		c, err := scanCard(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *c)
+	}
+	return out, rows.Err()
+}
+
+// SetUser attaches a single card to the given user_id (used at create
+// time when the caller is signed in).
+func (r *Repo) SetUser(ctx context.Context, cardID, userID string) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE cards SET user_id = $1 WHERE id = $2`, userID, cardID)
+	if err != nil {
+		return fmt.Errorf("set user: %w", err)
+	}
+	return nil
+}
+
+// AttachToUser sets user_id on every card currently attached to the
+// given device_id but NOT yet owned by any user. This is the silent
+// "claim" path at first sign-in. Returns the affected card IDs so the
+// caller can re-fetch them with the new user_id projection.
+func (r *Repo) AttachToUser(ctx context.Context, deviceID, userID string) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`UPDATE cards SET user_id = $1, updated_at = now()
+		 WHERE device_id = $2 AND user_id IS NULL
+		 RETURNING id`, userID, deviceID)
+	if err != nil {
+		return nil, fmt.Errorf("attach to user: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ResolveConflict applies one of three resolutions to a slug-collision
+// between a local-only card and one already on the user's account.
+//
+//	"local"   → overwrite the server's card with the local payload.
+//	"remote"  → discard the local (no-op on server, mobile drops its copy).
+//	"both"    → re-slug the local card with a fresh slug and INSERT as a
+//	             new server card owned by user_id.
+func (r *Repo) ResolveConflict(ctx context.Context, userID, slug, winner string, local *Card) (*Card, error) {
+	switch winner {
+	case "remote":
+		return r.GetBySlug(ctx, slug)
+	case "local":
+		// Server card stays at this slug; rewrite fields from local payload.
+		existing, err := r.GetBySlug(ctx, slug)
+		if err != nil {
+			return nil, err
+		}
+		local.ID = existing.ID
+		local.Slug = existing.Slug
+		if err := r.Update(ctx, local); err != nil {
+			return nil, err
+		}
+		return local, nil
+	case "both":
+		// Insert a fresh card with a new slug, owned by the user.
+		local.Slug = ""
+		local.ID = ""
+		local.DeviceID = ""
+		local.UserID = userID
+		if err := r.Create(ctx, local); err != nil {
+			return nil, err
+		}
+		// Attach user_id via UPDATE (Create doesn't take user_id from struct).
+		if _, err := r.db.ExecContext(ctx, `UPDATE cards SET user_id = $1 WHERE id = $2`, userID, local.ID); err != nil {
+			return nil, err
+		}
+		local.UserID = userID
+		return local, nil
+	default:
+		return nil, fmt.Errorf("unknown conflict winner %q", winner)
+	}
+}
+
 func (r *Repo) Update(ctx context.Context, c *Card) error {
 	emails, _ := json.Marshal(orEmpty(c.Emails))
 	phones, _ := json.Marshal(orEmpty(c.Phones))
@@ -130,6 +228,7 @@ const baseSelect = `
 	       template,
 	       COALESCE(custom_color, ''), COALESCE(wallet_style, ''),
 	       COALESCE(device_id, ''),
+	       COALESCE(user_id::text, ''),
 	       created_at, updated_at
 	FROM cards`
 
@@ -157,7 +256,7 @@ func scanCard(s rowScanner) (*Card, error) {
 		&c.Title, &c.Company,
 		&emailsRaw, &phonesRaw, &socialsRaw,
 		&c.PhotoURL, &c.BrandLogoURL, &c.Template,
-		&c.CustomColor, &c.WalletStyle, &c.DeviceID,
+		&c.CustomColor, &c.WalletStyle, &c.DeviceID, &c.UserID,
 		&c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err

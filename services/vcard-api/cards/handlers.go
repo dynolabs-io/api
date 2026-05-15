@@ -8,7 +8,21 @@ import (
 	"net/http"
 )
 
-type Handlers struct{ Repo *Repo }
+type Handlers struct {
+	Repo *Repo
+	// AuthVerify returns the authenticated user_id from the Authorization
+	// header (or "" if missing/invalid). Set by main from the auth
+	// Verifier. Optional — if nil, all calls are treated as anonymous
+	// device-bound (legacy behavior).
+	AuthVerify func(r *http.Request) string
+}
+
+func (h *Handlers) userID(r *http.Request) string {
+	if h.AuthVerify == nil {
+		return ""
+	}
+	return h.AuthVerify(r)
+}
 
 func (h *Handlers) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/cards", h.create)
@@ -43,10 +57,49 @@ func (h *Handlers) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// If the caller is signed in, attach the user_id so this card syncs
+	// across the user's other devices. Anonymous cards stay device-bound.
+	if uid := h.userID(r); uid != "" {
+		if err := h.Repo.SetUser(r.Context(), c.ID, uid); err == nil {
+			c.UserID = uid
+		}
+	}
 	writeJSON(w, http.StatusCreated, c)
 }
 
 func (h *Handlers) list(w http.ResponseWriter, r *http.Request) {
+	// Signed-in path: union of the user's cards + any device cards on
+	// THIS device that don't yet have a user_id (lets us show
+	// not-yet-claimed local cards alongside synced ones until the
+	// caller hits the claim endpoint).
+	if uid := h.userID(r); uid != "" {
+		out, err := h.Repo.ListByUser(r.Context(), uid)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		deviceID := r.URL.Query().Get("device_id")
+		if deviceID != "" {
+			dev, err := h.Repo.ListByDevice(r.Context(), deviceID)
+			if err == nil {
+				seen := make(map[string]bool, len(out))
+				for _, c := range out {
+					seen[c.ID] = true
+				}
+				for _, c := range dev {
+					if !seen[c.ID] && c.UserID == "" {
+						out = append(out, c)
+					}
+				}
+			}
+		}
+		if out == nil {
+			out = []Card{}
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	// Anonymous path: device-bound.
 	deviceID := r.URL.Query().Get("device_id")
 	if deviceID == "" {
 		writeErr(w, http.StatusBadRequest, "device_id required")

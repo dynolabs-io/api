@@ -5,7 +5,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"os"
@@ -13,7 +15,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/dynolabs-io/api/services/vcard-api/auth"
 	"github.com/dynolabs-io/api/services/vcard-api/cards"
+	"github.com/dynolabs-io/api/services/vcard-api/users"
 	"github.com/dynolabs-io/api/shared/health"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -48,8 +52,34 @@ func main() {
 			os.Exit(1)
 		}
 		cancel()
-		(&cards.Handlers{Repo: cards.NewRepo(db)}).Mount(mux)
-		slog.Info("postgres + cards mounted")
+
+		// Sign-in with Apple: optional. Bundle ID identifies the iOS
+		// app; HMAC secret signs our own session tokens (32 bytes hex).
+		// Falls back to an ephemeral secret with a warning so the pod
+		// boots even before the K8s secret is wired — auth simply won't
+		// survive a pod restart in that fallback.
+		bundleID := getenv("APPLE_BUNDLE_ID", "io.dynolabs.vcard")
+		secretHex := getenv("VCARD_HMAC_SECRET", "")
+		var secret []byte
+		if secretHex != "" {
+			s, err := hex.DecodeString(secretHex)
+			if err != nil {
+				slog.Error("VCARD_HMAC_SECRET must be hex", "err", err)
+				os.Exit(1)
+			}
+			secret = s
+		} else {
+			secret = make([]byte, 32)
+			_, _ = rand.Read(secret)
+			slog.Warn("VCARD_HMAC_SECRET not set — using ephemeral secret; sessions WILL invalidate on pod restart",
+				"hint", "set VCARD_HMAC_SECRET to 64 hex chars (openssl rand -hex 32)")
+		}
+		verifier := auth.New(bundleID, secret)
+		usersRepo := users.NewRepo(db)
+		cardsRepo := cards.NewRepo(db)
+		(&cards.Handlers{Repo: cardsRepo, AuthVerify: verifier.UserIDFromBearer}).Mount(mux)
+		(&auth.Handlers{V: verifier, Users: usersRepo, Cards: cardsRepo}).Mount(mux)
+		slog.Info("postgres + cards + auth mounted", "bundle", bundleID)
 	} else {
 		slog.Warn("DATABASE_URL not set — running without persistence")
 	}

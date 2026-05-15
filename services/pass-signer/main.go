@@ -690,7 +690,10 @@ func buildPass(c *card, passTypeID, teamID, webBase, vcfURLBase, mode string) pk
 	//             embed bytes to keep the QR scannable).
 	var qrMsg string
 	if mode == "online" {
-		qrMsg = vcfURLBase + "/v/" + c.Slug + ".vcf"
+		// No .vcf suffix — server route is /v/{slug} (Go 1.22 mux
+		// doesn't accept literal-suffix wildcards). iOS recognises the
+		// response as a vCard from Content-Type alone.
+		qrMsg = vcfURLBase + "/v/" + c.Slug
 	} else {
 		qrMsg = buildVCardText(c, webBase)
 	}

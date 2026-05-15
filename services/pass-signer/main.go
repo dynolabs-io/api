@@ -562,14 +562,37 @@ func fetchCard(ctx context.Context, apiBase, id, slug string) (*card, error) {
 func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 	bg, fg, lbl := templateColors(c.Template, c.CustomColor)
 
-	primary := []pkpass.Field{{Key: "name", Value: c.Name, Label: c.Label}}
-
-	secondary := []pkpass.Field{}
+	// Layout decisions, by region:
+	//
+	//   header (top, small):   no logoText, no headerFields → JUST the
+	//                          logo.png tile. Keeps the area above the
+	//                          strip clean so the photo isn't crowded
+	//                          out of frame.
+	//   primary fields:        EMPTY — primary lives RIGHT ABOVE the
+	//                          strip image in eventTicket layout and Apple
+	//                          draws it big. Putting the name there made
+	//                          the strip's photo look like it was being
+	//                          captioned ("name on face").
+	//   strip:                 photo + brand logo composite (renderHeroStrip).
+	//   secondary fields:      Name (col 1, prominent), Title (col 2). Below strip.
+	//   auxiliary fields:      Company, Phone, Email (3 cols).
+	//   back fields:           Full list of emails/phones + profile URL.
+	secondary := []pkpass.Field{
+		{Key: "name", Label: strings.ToUpper(c.Label), Value: c.Name},
+	}
 	if c.Title != "" {
 		secondary = append(secondary, pkpass.Field{Key: "title", Label: "TITLE", Value: c.Title})
 	}
+
+	aux := []pkpass.Field{}
 	if c.Company != "" {
-		secondary = append(secondary, pkpass.Field{Key: "company", Label: "COMPANY", Value: c.Company})
+		aux = append(aux, pkpass.Field{Key: "company", Label: "COMPANY", Value: c.Company})
+	}
+	if len(c.Phones) > 0 {
+		aux = append(aux, pkpass.Field{Key: "phone", Label: "PHONE", Value: c.Phones[0]})
+	}
+	if len(c.Emails) > 0 {
+		aux = append(aux, pkpass.Field{Key: "email", Label: "EMAIL", Value: c.Emails[0]})
 	}
 
 	back := []pkpass.Field{}
@@ -583,10 +606,6 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 		back = append(back, pkpass.Field{Key: "profile", Label: "Profile", Value: webBase + "/c/" + c.Slug})
 	}
 
-	// QR encodes the FULL vCard text (BEGIN:VCARD … END:VCARD) — same
-	// payload the app shows. Recipient's default camera reads it offline,
-	// offers Save to Contacts directly. Profile URL added as a URL field
-	// so they can also tap into the web page.
 	qrMsg := buildVCardText(c, webBase)
 
 	pass := pkpass.Pass{
@@ -596,10 +615,11 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 		TeamIdentifier:     teamID,
 		OrganizationName:   "Dynolabs",
 		Description:        "Dynolabs vCard — " + c.Name,
-		LogoText:           c.Name,
-		ForegroundColor:    fg,
-		BackgroundColor:    bg,
-		LabelColor:         lbl,
+		// No LogoText — keeps header area clean. Apple still shows the
+		// logo.png tile on the left.
+		ForegroundColor: fg,
+		BackgroundColor: bg,
+		LabelColor:      lbl,
 		Barcodes: []pkpass.Barcode{{
 			Format:          "PKBarcodeFormatQR",
 			Message:         qrMsg,
@@ -607,25 +627,12 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 			AltText:         strings.TrimSpace(c.Name),
 		}},
 	}
-	style := &pkpass.Style{
-		PrimaryFields:   primary,
+	pass.EventTicket = &pkpass.Style{
+		// PrimaryFields intentionally empty — see comment above.
 		SecondaryFields: secondary,
+		AuxiliaryFields: aux,
 		BackFields:      back,
 	}
-	// Add auxiliary fields populated from card data so the middle of the
-	// pass isn't empty. Apple shows up to 4 auxiliary fields in a row.
-	aux := []pkpass.Field{}
-	if len(c.Phones) > 0 {
-		aux = append(aux, pkpass.Field{Key: "phone", Label: "PHONE", Value: c.Phones[0]})
-	}
-	if len(c.Emails) > 0 {
-		aux = append(aux, pkpass.Field{Key: "email", Label: "EMAIL", Value: c.Emails[0]})
-	}
-	style.AuxiliaryFields = aux
-
-	// Single eventTicket layout for all wallet styles — the visual
-	// difference comes from the strip image, not the pass style.
-	pass.EventTicket = style
 	return pass
 }
 

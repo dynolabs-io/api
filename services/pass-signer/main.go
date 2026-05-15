@@ -14,12 +14,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
-	_ "image/gif"  // register GIF decoder for image.Decode
-	_ "image/jpeg" // register JPEG decoder — photo-cdn returns JPEGs
+	_ "image/gif" // register GIF decoder for image.Decode
+	"image/jpeg"  // encoder for the embedded vCard PHOTO thumbnail
 	"image/png"
 	"io"
 	"log/slog"
@@ -195,9 +196,9 @@ func main() {
 			"hasLogo", c.BrandLogoURL != "",
 			"ua", r.UserAgent())
 
-		pass := buildPass(c, passTypeID, teamID, webBase)
-
-		// Fetch brand logo + profile photo once.
+		// Fetch brand logo + profile photo BEFORE buildPass so the QR
+		// vCard can embed a small JPEG thumbnail of the photo (iOS Camera
+		// only saves embedded photos from a scanned QR, not remote URIs).
 		var brandLogoBytes, photoBytes []byte
 		if c.BrandLogoURL != "" && strings.HasPrefix(c.BrandLogoURL, "http") {
 			if b, err := fetchThumbnail(r.Context(), c.BrandLogoURL); err == nil && len(b) > 0 {
@@ -213,6 +214,18 @@ func main() {
 				slog.Warn("photo fetch failed", "err", err, "url", c.PhotoURL)
 			}
 		}
+
+		// Build the small embedded photo for the vCard QR (≤ ~2 KB).
+		var embeddedPhotoBytes []byte
+		if len(photoBytes) > 0 {
+			if thumb, err := thumbnailJPEG(photoBytes, 80, 35); err == nil {
+				embeddedPhotoBytes = thumb
+			} else {
+				slog.Warn("vcard photo thumb encode failed", "err", err)
+			}
+		}
+
+		pass := buildPass(c, passTypeID, teamID, webBase, embeddedPhotoBytes)
 
 		// Apple's "logo" header slot (top-left, beside logoText) is a
 		// small decorative chip. We keep it as a brand-colored tile so the
@@ -559,7 +572,7 @@ func fetchCard(ctx context.Context, apiBase, id, slug string) (*card, error) {
 	return &c, nil
 }
 
-func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
+func buildPass(c *card, passTypeID, teamID, webBase string, embeddedPhoto []byte) pkpass.Pass {
 	bg, fg, lbl := templateColors(c.Template, c.CustomColor)
 
 	// Layout decisions, by region:
@@ -606,7 +619,12 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 		back = append(back, pkpass.Field{Key: "profile", Label: "Profile", Value: webBase + "/c/" + c.Slug})
 	}
 
-	qrMsg := buildVCardText(c, webBase)
+	// vCard payload — caller passes the photo bytes (already fetched for
+	// the strip render) so we can embed a small JPEG thumbnail directly in
+	// the QR. iOS Camera does NOT fetch remote PHOTO;VALUE=uri URIs when
+	// saving from a scanned QR — only embedded photos appear in the
+	// saved contact.
+	qrMsg := buildVCardText(c, webBase, embeddedPhoto)
 
 	pass := pkpass.Pass{
 		FormatVersion:      1,
@@ -624,11 +642,17 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 			Format:          "PKBarcodeFormatQR",
 			Message:         qrMsg,
 			MessageEncoding: "iso-8859-1",
-			AltText:         strings.TrimSpace(c.Name),
+			// AltText intentionally omitted: the same name is already
+			// rendered in secondaryFields right above the QR.
 		}},
 	}
-	pass.EventTicket = &pkpass.Style{
-		// PrimaryFields intentionally empty — see comment above.
+	// storeCard instead of eventTicket: storeCard's strip slot is
+	// 312×123pt (~2.54:1), almost exactly our 1125×432 canvas (~2.60:1).
+	// eventTicket's slot is 320×84pt (~3.81:1) — that's why a circle
+	// drawn in our canvas displayed as an oval (different horizontal vs
+	// vertical scale to fit the slot).
+	pass.StoreCard = &pkpass.Style{
+		// PrimaryFields intentionally empty — keeps the strip uncluttered.
 		SecondaryFields: secondary,
 		AuxiliaryFields: aux,
 		BackFields:      back,
@@ -636,12 +660,31 @@ func buildPass(c *card, passTypeID, teamID, webBase string) pkpass.Pass {
 	return pass
 }
 
-// buildVCardText serializes a vCard 3.0 string identical to the mobile
-// client's lib/vcard.ts output, so the wallet pass QR matches the in-app QR.
-func buildVCardText(c *card, webBase string) string {
+// buildVCardText serializes a vCard 3.0 string for the QR payload.
+//
+// Critical bits that previous iterations got wrong (founder feedback from
+// scanned-contact result):
+//
+//   • iOS Camera "Save to Contacts" uses N (structured name) as the
+//     display source. Without N, it falls back to ORG → the saved
+//     contact's name became "Dynolabs" instead of "Nehir Baysal". We now
+//     emit both N and FN.
+//   • Untyped URL is labeled "homepage" by iOS Contacts. The Dynolabs
+//     profile URL is a work-related link, so we tag it TYPE=WORK.
+//   • iOS Camera does NOT fetch PHOTO;VALUE=uri remote URIs when saving
+//     contacts from a scanned QR — only EMBEDDED base64 photos show up
+//     in the saved contact's avatar. If photoBytes is provided we embed
+//     a small JPEG thumbnail (kept tiny so the QR remains scannable).
+//
+// Format kept compatible with the mobile client's lib/vcard.ts.
+func buildVCardText(c *card, webBase string, embeddedPhoto []byte) string {
 	var sb strings.Builder
 	sb.WriteString("BEGIN:VCARD\r\n")
 	sb.WriteString("VERSION:3.0\r\n")
+	// N: structured name (last;first;middle;prefix;suffix). Split on
+	// last whitespace. Fallback to ;<name>;;; (given-name only).
+	last, first := splitName(c.Name)
+	sb.WriteString("N:" + escapeVCard(last) + ";" + escapeVCard(first) + ";;;\r\n")
 	sb.WriteString("FN:" + escapeVCard(c.Name) + "\r\n")
 	if c.Title != "" {
 		sb.WriteString("TITLE:" + escapeVCard(c.Title) + "\r\n")
@@ -656,16 +699,92 @@ func buildVCardText(c *card, webBase string) string {
 		sb.WriteString("TEL;TYPE=CELL:" + escapeVCard(p) + "\r\n")
 	}
 	for _, s := range c.Socials {
-		sb.WriteString("URL:" + escapeVCard(s.URL) + "\r\n")
+		sb.WriteString("URL;TYPE=WORK:" + escapeVCard(s.URL) + "\r\n")
 	}
 	if c.Slug != "" {
-		sb.WriteString("URL:" + escapeVCard(webBase+"/c/"+c.Slug) + "\r\n")
+		sb.WriteString("URL;TYPE=WORK:" + escapeVCard(webBase+"/c/"+c.Slug) + "\r\n")
 	}
-	if c.PhotoURL != "" {
-		sb.WriteString("PHOTO;VALUE=uri:" + c.PhotoURL + "\r\n")
+	// Embed a small JPEG thumbnail directly so iOS Contacts shows the
+	// face avatar after a QR-scan save. Folding (vCard 3.0 line-folding
+	// rule) is applied per RFC 2425 §5.8.1: any line > 75 octets must be
+	// continued by CRLF SPACE.
+	if len(embeddedPhoto) > 0 {
+		b64 := base64.StdEncoding.EncodeToString(embeddedPhoto)
+		sb.WriteString(foldVCardLine("PHOTO;ENCODING=b;TYPE=JPEG:" + b64))
 	}
 	sb.WriteString("END:VCARD\r\n")
 	return sb.String()
+}
+
+// splitName splits "First Middle Last" into ("Last", "First Middle").
+// Single-word names go to first-name with empty last-name.
+func splitName(full string) (last, first string) {
+	full = strings.TrimSpace(full)
+	if full == "" {
+		return "", ""
+	}
+	idx := strings.LastIndex(full, " ")
+	if idx <= 0 {
+		return "", full
+	}
+	return full[idx+1:], strings.TrimSpace(full[:idx])
+}
+
+// foldVCardLine folds a long property line per RFC 2425 §5.8.1: each
+// continuation line starts with a single space. Returns the line with a
+// trailing CRLF.
+func foldVCardLine(line string) string {
+	const max = 75
+	if len(line) <= max {
+		return line + "\r\n"
+	}
+	var b strings.Builder
+	b.Grow(len(line) + len(line)/max*3)
+	for i := 0; i < len(line); i += max {
+		end := i + max
+		if end > len(line) {
+			end = len(line)
+		}
+		if i > 0 {
+			b.WriteString(" ")
+		}
+		b.WriteString(line[i:end])
+		b.WriteString("\r\n")
+	}
+	return b.String()
+}
+
+// thumbnailJPEG resizes raw image bytes (any decodable format) to a
+// square JPEG sized for the vCard PHOTO embed. Target ≤ 2 KB so the
+// total QR payload stays scannable on a typical phone display.
+func thumbnailJPEG(src []byte, size int, quality int) ([]byte, error) {
+	srcImg, _, err := image.Decode(bytes.NewReader(src))
+	if err != nil {
+		return nil, err
+	}
+	sw, sh := srcImg.Bounds().Dx(), srcImg.Bounds().Dy()
+	sz := sw
+	if sh < sw {
+		sz = sh
+	}
+	sx0 := (sw - sz) / 2
+	sy0 := (sh - sz) / 2
+	dst := image.NewNRGBA(image.Rect(0, 0, size, size))
+	for y := 0; y < size; y++ {
+		sy := sy0 + (y*sz)/size
+		for x := 0; x < size; x++ {
+			sx := sx0 + (x*sz)/size
+			r, g, b, a := srcImg.At(sx, sy).RGBA()
+			dst.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
+			})
+		}
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: quality}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 func escapeVCard(s string) string {

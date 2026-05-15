@@ -252,28 +252,27 @@ func main() {
 		}
 
 		// Strip image fills the top ~25% of the pass front, full width.
-		// This is the biggest visible image slot Apple gives us in the
-		// eventTicket layout.
-		// - photoStrip (default if photo present): user's profile photo, full width
-		// - logoStrip: brand-color background with the brand logo centered
+		// Two named styles: photoStrip (profile photo) | logoStrip (brand bg + logo).
+		// Any other (or empty) value falls back to photoStrip if a photo
+		// exists, else logoStrip — so legacy DB values don't produce blank passes.
 		strip := c.WalletStyle
-		if strip == "" {
+		if strip != "photoStrip" && strip != "logoStrip" {
 			if len(photoBytes) > 0 {
 				strip = "photoStrip"
 			} else {
 				strip = "logoStrip"
 			}
 		}
+		if strip == "photoStrip" && len(photoBytes) == 0 {
+			strip = "logoStrip"
+		}
 		switch strip {
 		case "photoStrip":
-			if len(photoBytes) > 0 {
-				if s, err := fitToCanvas(photoBytes, 1125, 432); err == nil {
-					assets["strip.png"] = s
-					assets["strip@2x.png"] = s
-				}
+			if s, err := fitToCanvas(photoBytes, 1125, 432); err == nil {
+				assets["strip.png"] = s
+				assets["strip@2x.png"] = s
 			}
 		case "logoStrip":
-			// Brand color bg + centered logo. Looks like a corporate banner.
 			if s, err := renderLogoStrip(c, brandLogoBytes, 1125, 432); err == nil {
 				assets["strip.png"] = s
 				assets["strip@2x.png"] = s

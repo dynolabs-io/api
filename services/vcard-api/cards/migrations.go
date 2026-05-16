@@ -65,6 +65,32 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS scans_scanner_idx ON scans(scanner_user_id, scanned_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS scans_target_idx ON scans(target_slug, scanned_at DESC)`,
+		// "leads" — visitors to dynolabs.io/c/<slug> who used the
+		// "request callback" form. Belongs to the card OWNER via the
+		// slug lookup (cards.slug → cards.user_id).
+		`CREATE TABLE IF NOT EXISTS leads (
+			id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			target_slug  TEXT NOT NULL,
+			from_name    TEXT,
+			from_email   TEXT,
+			from_phone   TEXT,
+			message      TEXT,
+			created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS leads_target_idx ON leads(target_slug, created_at DESC)`,
+		// "scan_events" — anonymous fact table: every hit on /v/<slug>
+		// or web profile page view counts here. Used for Inbox reach
+		// analytics. Lightweight: ip_geo (city), ua_family, no PII.
+		`CREATE TABLE IF NOT EXISTS scan_events (
+			id          BIGSERIAL PRIMARY KEY,
+			target_slug TEXT NOT NULL,
+			kind        TEXT NOT NULL,  -- 'vcf' | 'profile' | 'pkpass'
+			city        TEXT,
+			country     TEXT,
+			ua_family   TEXT,
+			occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS scan_events_target_idx ON scan_events(target_slug, occurred_at DESC)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

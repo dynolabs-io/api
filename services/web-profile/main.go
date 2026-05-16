@@ -73,6 +73,39 @@ func main() {
 		_ = tmpl.Execute(w, card)
 	})
 
+	// Lead capture form submission — proxies to vcard-api /v1/leads.
+	mux.HandleFunc("POST /c/{slug}/lead", func(w http.ResponseWriter, r *http.Request) {
+		slug := r.PathValue("slug")
+		if !validSlug(slug) {
+			http.Error(w, "invalid slug", http.StatusBadRequest)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, "bad form", http.StatusBadRequest)
+			return
+		}
+		payload := map[string]string{
+			"targetSlug": slug,
+			"fromName":   strings.TrimSpace(r.FormValue("name")),
+			"fromEmail":  strings.TrimSpace(r.FormValue("email")),
+			"fromPhone":  strings.TrimSpace(r.FormValue("phone")),
+			"message":    strings.TrimSpace(r.FormValue("message")),
+		}
+		body, _ := json.Marshal(payload)
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		req, _ := http.NewRequestWithContext(ctx, "POST", apiBase+"/v1/leads", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil || res.StatusCode >= 300 {
+			http.Error(w, "submit failed", http.StatusBadGateway)
+			return
+		}
+		defer res.Body.Close()
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(thanksHTML))
+	})
+
 	// Direct vCard download for "Save Contact" button. Path uses /save.vcf
 	// suffix because Go 1.22 ServeMux requires wildcards to occupy a full
 	// segment — `/c/{slug}.vcf` is rejected at registration time.
@@ -242,8 +275,40 @@ const profileHTML = `<!doctype html>
       {{ range .Phones }}<div class="row"><span class="icon">PHONE</span><a href="tel:{{ . }}">{{ . }}</a></div>{{ end }}
       {{ range .Socials }}<div class="row"><span class="icon">{{ .Kind }}</span><a href="{{ .URL }}">{{ .URL }}</a></div>{{ end }}
       <a class="save" href="/c/{{ .Slug }}/save.vcf">Save to Contacts</a>
+      <details class="lead">
+        <summary>Want them to call you back?</summary>
+        <form method="post" action="/c/{{ .Slug }}/lead" class="leadForm">
+          <input type="text" name="name" placeholder="Your name" autocomplete="name">
+          <input type="email" name="email" placeholder="Your email" autocomplete="email">
+          <input type="tel" name="phone" placeholder="Your phone (optional)" autocomplete="tel">
+          <textarea name="message" placeholder="Quick message" rows="3"></textarea>
+          <button type="submit">Send</button>
+        </form>
+      </details>
     </div>
     <p class="ghost">Powered by Dynolabs</p>
+  </div>
+</body>
+</html>`
+
+const thanksHTML = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sent — Dynolabs vCard</title>
+  <style>
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;background:#0B0B0F;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif}
+    .wrap{max-width:480px;margin:0 auto;padding:6rem 1.5rem;text-align:center}
+    h1{font-size:1.6rem;font-weight:700;margin:0 0 1rem}
+    p{color:rgba(255,255,255,0.7);line-height:1.5}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Sent</h1>
+    <p>They'll see your details in their Dynolabs inbox.</p>
   </div>
 </body>
 </html>`

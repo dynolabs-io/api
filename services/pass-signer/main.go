@@ -235,13 +235,23 @@ func main() {
 
 		pass := buildPass(c, passTypeID, teamID, webBase, vcfURLBase, mode)
 
-		// Apple's "logo" header slot (top-left, beside logoText) is a
-		// small decorative chip. We keep it as a brand-colored tile so the
-		// company logo doesn't get squished into 160×50 — it gets the full
-		// strip width below. icon is also brand-colored for the lock-screen
-		// notification.
+		// Apple's "logo" header slot (top-left of the pass) is a small
+		// rectangular chip. The "icon" is a square (29pt) shown wherever
+		// the pass appears in lists / lock-screen.
+		//
+		// Build 126: company brand logo lives HERE (not on the strip). If
+		// the card has a brand logo, fit it into the header. Falls back to
+		// a brand-colored tile so the pass always renders.
 		iconAsset := iconPNG(87, c.Template, c.CustomColor)
 		logoAsset := iconPNG(160, c.Template, c.CustomColor)
+		if len(brandLogoBytes) > 0 {
+			if ic, err := fitLogoToTile(brandLogoBytes, 87, 87, c); err == nil {
+				iconAsset = ic
+			}
+			if lg, err := fitLogoToTile(brandLogoBytes, 160, 50, c); err == nil {
+				logoAsset = lg
+			}
+		}
 		assets := map[string][]byte{
 			"icon.png":    iconAsset,
 			"icon@2x.png": iconAsset,
@@ -392,6 +402,58 @@ func fitToCanvas(src []byte, w, h int) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// fitLogoToTile renders the brand logo onto a w×h PNG with the card's
+// brand color as background. Aspect-preserved fit (no crop). Used for
+// the Apple Wallet header icon + logo slots so the company brand shows
+// in pass lists / lock-screen notifications.
+func fitLogoToTile(src []byte, w, h int, c *card) ([]byte, error) {
+	srcImg, _, err := image.Decode(bytes.NewReader(src))
+	if err != nil {
+		return nil, err
+	}
+	br, bg, bb := hexToRGB(brandColorHex(c))
+	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			canvas.SetNRGBA(x, y, color.NRGBA{R: br, G: bg, B: bb, A: 255})
+		}
+	}
+	sw, sh := srcImg.Bounds().Dx(), srcImg.Bounds().Dy()
+	if sw == 0 || sh == 0 {
+		return nil, fmt.Errorf("empty logo")
+	}
+	srcRatio := float64(sw) / float64(sh)
+	dstRatio := float64(w) / float64(h)
+	var cw, ch int
+	if srcRatio > dstRatio {
+		cw = w * 86 / 100
+		ch = int(float64(cw) / srcRatio)
+	} else {
+		ch = h * 86 / 100
+		cw = int(float64(ch) * srcRatio)
+	}
+	px := (w - cw) / 2
+	py := (h - ch) / 2
+	for y := 0; y < ch; y++ {
+		sy := (y * sh) / ch
+		for x := 0; x < cw; x++ {
+			sx := (x * sw) / cw
+			r, g, b, a := srcImg.At(sx, sy).RGBA()
+			if a>>8 < 16 {
+				continue
+			}
+			canvas.SetNRGBA(px+x, py+y, color.NRGBA{
+				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
+			})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, canvas); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // brandColorHex returns the brand color for a card. customColor wins,
 // otherwise the template provides a default.
 func brandColorHex(c *card) string {
@@ -409,21 +471,20 @@ func brandColorHex(c *card) string {
 	return "#0B0B0F"
 }
 
-// renderHeroStrip composes the front banner of the Wallet pass. The strip
-// is 1125×432 (the largest Apple slot for eventTicket) and ALWAYS uses the
-// full canvas — no empty space.
+// renderHeroStrip composes the front banner of the Wallet pass.
 //
-// Layout adapts to whatever the user uploaded:
-//
-//   photo + logo → photo as a left-anchored circle, logo on the right half
-//                  centered on the brand color band. Both visible at once.
-//   photo only   → photo cover-cropped to the full strip + brand-color
-//                  vignette on the right edge (keeps face anchored left).
-//   logo only    → logo centered on full brand-color background, sized to
-//                  ~70% of canvas height.
-//   neither      → solid brand color (lets the Apple-rendered text fields
-//                  fill what would otherwise be a void).
+// Build 126 redesign — CENTERED MEDALLION:
+//   • Brand-color background fills the full 1125×432 canvas (storeCard's
+//     strip slot is ~2.54:1, our canvas matches).
+//   • Photo (if any) rendered as a perfect circle dead center, sized to
+//     ~88% of canvas height. White ring (8px) frames it against the brand
+//     color so it pops on any background.
+//   • NO logo on the strip — the company logo lives in the small Apple
+//     header tile (logo.png slot) only. Keeps the medallion uncluttered.
+//   • Photo-less cards: brand-color strip stays clean; logo header tile
+//     + secondary/auxiliary fields carry the identity.
 func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, error) {
+	_ = logoBytes // intentionally unused on the strip — header tile owns it
 	br, bg, bb := hexToRGB(brandColorHex(c))
 	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
@@ -431,40 +492,15 @@ func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, e
 			canvas.SetNRGBA(x, y, color.NRGBA{R: br, G: bg, B: bb, A: 255})
 		}
 	}
-
-	hasPhoto := len(photoBytes) > 0
-	hasLogo := len(logoBytes) > 0
-
-	switch {
-	case hasPhoto && hasLogo:
-		// SPLIT LAYOUT — photo circle anchored left, logo right.
-		// Photo circle ~ 360px diameter, vertically centered, 36px from left.
-		photoDiam := h * 90 / 100 // 388
-		if photoDiam > w*38/100 {
-			photoDiam = w * 38 / 100
+	if len(photoBytes) > 0 {
+		photoDiam := h * 88 / 100
+		if photoDiam > w*40/100 {
+			photoDiam = w * 40 / 100
 		}
-		photoOX := h * 5 / 100 // 21px left margin
-		photoOY := (h - photoDiam) / 2
-		drawCircularPhoto(canvas, photoBytes, photoOX, photoOY, photoDiam)
-		// Logo in the right ~58% of canvas (from photo right edge to right).
-		logoBoxX := photoOX + photoDiam + h*8/100
-		logoBoxW := w - logoBoxX - h*5/100
-		logoBoxH := h * 80 / 100
-		logoBoxY := (h - logoBoxH) / 2
-		drawLogoFit(canvas, logoBytes, logoBoxX, logoBoxY, logoBoxW, logoBoxH)
-	case hasPhoto:
-		// PHOTO-DOMINANT — cover-crop fit. Apple's pass already has a brand
-		// color background, so we let the photo own the strip.
-		coverDrawPhoto(canvas, photoBytes, 0, 0, w, h)
-	case hasLogo:
-		// LOGO-CENTERED — fits ~70% of canvas height, max 80% width.
-		boxH := h * 70 / 100
-		boxW := w * 80 / 100
-		drawLogoFit(canvas, logoBytes, (w-boxW)/2, (h-boxH)/2, boxW, boxH)
-	default:
-		// Plain brand color — Apple's text overlay handles content.
+		ox := (w - photoDiam) / 2
+		oy := (h - photoDiam) / 2
+		drawCircularPhoto(canvas, photoBytes, ox, oy, photoDiam)
 	}
-
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, canvas); err != nil {
 		return nil, err
@@ -474,7 +510,9 @@ func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, e
 
 // drawCircularPhoto draws a center-cover-cropped photo inside a circle at
 // (ox, oy) with the given diameter. Pixels outside the circle are left
-// untouched so the underlying brand color shows through.
+// untouched so the underlying brand color shows through. A thick white
+// ring (12px) frames the photo for medallion contrast against any brand
+// color background.
 func drawCircularPhoto(canvas *image.NRGBA, photoBytes []byte, ox, oy, diam int) {
 	photoImg, _, err := image.Decode(bytes.NewReader(photoBytes))
 	if err != nil {
@@ -491,9 +529,8 @@ func drawCircularPhoto(canvas *image.NRGBA, photoBytes []byte, ox, oy, diam int)
 	cx := ox + radius
 	cy := oy + radius
 	r2 := radius * radius
-	// Draw a thin white ring (4px) just inside the radius to make the photo
-	// pop against the brand color.
-	ringInner := radius - 4
+	const ring = 12
+	ringInner := radius - ring
 	ringInner2 := ringInner * ringInner
 	for y := 0; y < diam; y++ {
 		for x := 0; x < diam; x++ {
@@ -507,8 +544,13 @@ func drawCircularPhoto(canvas *image.NRGBA, photoBytes []byte, ox, oy, diam int)
 				canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
 				continue
 			}
-			sx := sx0 + (x*sz)/diam
-			sy := sy0 + (y*sz)/diam
+			// Photo inside the ring, scaled to (radius-ring)*2 source range.
+			inDiam := diam - 2*ring
+			sx := sx0 + ((x - ring) * sz) / inDiam
+			sy := sy0 + ((y - ring) * sz) / inDiam
+			if sx < 0 || sx >= sw || sy < 0 || sy >= sh {
+				continue
+			}
 			r, g, b, a := photoImg.At(sx, sy).RGBA()
 			canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
 				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),

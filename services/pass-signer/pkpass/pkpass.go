@@ -97,6 +97,12 @@ type Pass struct {
 	ForegroundColor    string    `json:"foregroundColor,omitempty"`
 	BackgroundColor    string    `json:"backgroundColor,omitempty"`
 	LabelColor         string    `json:"labelColor,omitempty"`
+	// Web-service URL + auth token: enables Wallet to call back for
+	// push-driven pass updates. Wallet will POST to
+	// <webServiceURL>/v1/devices/.../registrations/... when the user
+	// adds the pass, then GET /v1/passes/... when notified.
+	WebServiceURL       string    `json:"webServiceURL,omitempty"`
+	AuthenticationToken string    `json:"authenticationToken,omitempty"`
 	Barcodes           []Barcode `json:"barcodes,omitempty"`
 	// One of Generic / StoreCard / Coupon / EventTicket / BoardingPass.
 	// EventTicket has the most prominent center-of-pass barcode area —

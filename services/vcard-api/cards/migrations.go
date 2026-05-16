@@ -91,6 +91,31 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			occurred_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`,
 		`CREATE INDEX IF NOT EXISTS scan_events_target_idx ON scan_events(target_slug, occurred_at DESC)`,
+		// Reveal mode: opt-in flag on a scan. When true, the scanner has
+		// chosen to disclose their identity (Dynolabs user_id) to the
+		// scanned card's owner so they show up in Inbox > Connections.
+		`ALTER TABLE scans ADD COLUMN IF NOT EXISTS reveal BOOLEAN NOT NULL DEFAULT FALSE`,
+		// Block list — a card owner can hide a specific scanner_user_id
+		// from their inbox. The scanner still has their rolodex entry;
+		// the owner just doesn't see them.
+		`CREATE TABLE IF NOT EXISTS blocks (
+			owner_user_id   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			blocked_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (owner_user_id, blocked_user_id)
+		)`,
+		// Apple Wallet pass-registrations for push-update web-service.
+		// One row per (device, pass-serial). pushToken used to send APNs.
+		`CREATE TABLE IF NOT EXISTS wallet_registrations (
+			pass_type_id    TEXT NOT NULL,
+			serial_number   TEXT NOT NULL,
+			device_id       TEXT NOT NULL,
+			push_token      TEXT NOT NULL,
+			created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+			PRIMARY KEY (pass_type_id, serial_number, device_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS wallet_reg_serial_idx ON wallet_registrations(serial_number)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

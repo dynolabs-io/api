@@ -20,6 +20,7 @@ import (
 	"github.com/dynolabs-io/api/services/vcard-api/leads"
 	"github.com/dynolabs-io/api/services/vcard-api/scans"
 	"github.com/dynolabs-io/api/services/vcard-api/users"
+	"github.com/dynolabs-io/api/services/vcard-api/wallet"
 	"github.com/dynolabs-io/api/shared/health"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -85,7 +86,17 @@ func main() {
 		(&scans.Handlers{Repo: scansRepo, AuthVerify: verifier.UserIDFromBearer}).Mount(mux)
 		leadsRepo := leads.NewRepo(db)
 		(&leads.Handlers{Repo: leadsRepo, AuthVerify: verifier.UserIDFromBearer}).Mount(mux)
-		slog.Info("postgres + cards + auth + scans + leads mounted", "bundle", bundleID)
+		// Apple Wallet web-service. PassBuilder is a passthrough to
+		// pass-signer's /pass/apple endpoint — when iOS Wallet asks for
+		// a refreshed pass we proxy the call.
+		walletRepo := wallet.NewRepo(db)
+		walletToken := getenv("WALLET_WEBSERVICE_TOKEN", "")
+		(&wallet.Handlers{
+			Repo:        walletRepo,
+			AuthToken:   walletToken,
+			PassBuilder: wallet.PassSignerBuilder(getenv("PASS_SIGNER_URL", "http://pass-signer.dynolabs.svc")),
+		}).Mount(mux)
+		slog.Info("postgres + cards + auth + scans + leads + wallet mounted", "bundle", bundleID)
 	} else {
 		slog.Warn("DATABASE_URL not set — running without persistence")
 	}

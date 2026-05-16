@@ -120,6 +120,11 @@ func main() {
 	// the URL in the iOS Camera preview; the server returns a vCard with
 	// the full-resolution photo embedded. Defaults to the production host.
 	vcfURLBase := getenv("VCARD_URL_BASE", "https://api.dynolabs.io")
+	// Wallet web-service base URL — where iOS Wallet calls back for
+	// push updates. Lives in vcard-api (which has the DB + ingress
+	// reach). Token must match WALLET_WEBSERVICE_TOKEN there.
+	walletBase := getenv("WALLET_WEBSERVICE_URL", "https://api.dynolabs.io")
+	walletToken := getenv("WALLET_WEBSERVICE_TOKEN", "")
 	certPath := getenv("APPLE_PASS_CERT_PATH", "/etc/dynolabs-apple-pass/passcert.pem")
 	keyPath := getenv("APPLE_PASS_KEY_PATH", "/etc/dynolabs-apple-pass/passkey.pem")
 	wwdrPath := getenv("APPLE_PASS_WWDR_PATH", "/etc/dynolabs-apple-pass/wwdr.pem")
@@ -234,6 +239,10 @@ func main() {
 		}
 
 		pass := buildPass(c, passTypeID, teamID, webBase, vcfURLBase, mode)
+		if walletToken != "" {
+			pass.WebServiceURL = walletBase
+			pass.AuthenticationToken = walletToken
+		}
 
 		// Apple's "logo" header slot (top-left of the pass) is a small
 		// rectangular chip. The "icon" is a square (29pt) shown wherever

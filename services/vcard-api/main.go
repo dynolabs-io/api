@@ -17,6 +17,7 @@ import (
 
 	"github.com/dynolabs-io/api/services/vcard-api/auth"
 	"github.com/dynolabs-io/api/services/vcard-api/cards"
+	"github.com/dynolabs-io/api/services/vcard-api/scans"
 	"github.com/dynolabs-io/api/services/vcard-api/users"
 	"github.com/dynolabs-io/api/shared/health"
 
@@ -79,7 +80,9 @@ func main() {
 		cardsRepo := cards.NewRepo(db)
 		(&cards.Handlers{Repo: cardsRepo, AuthVerify: verifier.UserIDFromBearer}).Mount(mux)
 		(&auth.Handlers{V: verifier, Users: usersRepo, Cards: cardsRepo}).Mount(mux)
-		slog.Info("postgres + cards + auth mounted", "bundle", bundleID)
+		scansRepo := scans.NewRepo(db)
+		(&scans.Handlers{Repo: scansRepo, AuthVerify: verifier.UserIDFromBearer}).Mount(mux)
+		slog.Info("postgres + cards + auth + scans mounted", "bundle", bundleID)
 	} else {
 		slog.Warn("DATABASE_URL not set — running without persistence")
 	}

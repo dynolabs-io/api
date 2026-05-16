@@ -44,6 +44,27 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		)`,
 		`ALTER TABLE cards ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id) ON DELETE SET NULL`,
 		`CREATE INDEX IF NOT EXISTS cards_user_idx ON cards(user_id)`,
+		// "scans" — the rolodex. One row per scan event by a Dynolabs user.
+		// scanner_user_id NULL when the scanner is anonymous (mobile keeps
+		// the row locally only). target_slug is the public slug of the
+		// scanned card — owner is found via cards.slug lookup.
+		// notes / tags / location / event_name / scanned_at all per-scan.
+		`CREATE TABLE IF NOT EXISTS scans (
+			id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			scanner_user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+			target_slug     TEXT NOT NULL,
+			notes           TEXT,
+			tags            JSONB NOT NULL DEFAULT '[]'::jsonb,
+			lat             DOUBLE PRECISION,
+			lon             DOUBLE PRECISION,
+			place_name      TEXT,
+			event_name      TEXT,
+			scanned_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+			created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+		)`,
+		`CREATE INDEX IF NOT EXISTS scans_scanner_idx ON scans(scanner_user_id, scanned_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS scans_target_idx ON scans(target_slug, scanned_at DESC)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

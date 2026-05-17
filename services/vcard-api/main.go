@@ -17,6 +17,7 @@ import (
 
 	"github.com/dynolabs-io/api/services/vcard-api/auth"
 	"github.com/dynolabs-io/api/services/vcard-api/cards"
+	"github.com/dynolabs-io/api/services/vcard-api/enrich"
 	"github.com/dynolabs-io/api/services/vcard-api/leads"
 	"github.com/dynolabs-io/api/services/vcard-api/scans"
 	"github.com/dynolabs-io/api/services/vcard-api/users"
@@ -96,7 +97,12 @@ func main() {
 			AuthToken:   walletToken,
 			PassBuilder: wallet.PassSignerBuilder(getenv("PASS_SIGNER_URL", "http://pass-signer.dynolabs.svc")),
 		}).Mount(mux)
-		slog.Info("postgres + cards + auth + scans + leads + wallet mounted", "bundle", bundleID)
+		// Apollo.io email-enrichment — fills title+company gap that
+		// LinkedIn OIDC leaves blank after sign-in. Graceful-skip
+		// when APOLLO_API_KEY is unset (returns empty fields).
+		apolloClient := enrich.NewClient(getenv("APOLLO_API_KEY", ""))
+		(&enrich.Handlers{Client: apolloClient, AuthVerify: verifier.UserIDFromBearer}).Mount(mux)
+		slog.Info("postgres + cards + auth + scans + leads + wallet + enrich mounted", "bundle", bundleID)
 	} else {
 		slog.Warn("DATABASE_URL not set — running without persistence")
 	}

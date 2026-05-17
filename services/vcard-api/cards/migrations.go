@@ -116,6 +116,14 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			PRIMARY KEY (pass_type_id, serial_number, device_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS wallet_reg_serial_idx ON wallet_registrations(serial_number)`,
+		// LinkedIn identity alongside Apple. A user can sign in with
+		// either provider; they may eventually link both. apple_sub is
+		// already UNIQUE NOT NULL — relax to allow NULL so LinkedIn-only
+		// users exist, and add linkedin_sub UNIQUE.
+		`ALTER TABLE users ALTER COLUMN apple_sub DROP NOT NULL`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS linkedin_sub TEXT`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS users_linkedin_sub_uniq ON users(linkedin_sub) WHERE linkedin_sub IS NOT NULL`,
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_url TEXT`,
 	}
 	for _, s := range stmts {
 		if _, err := db.ExecContext(ctx, s); err != nil {

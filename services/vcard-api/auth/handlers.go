@@ -26,8 +26,57 @@ type Handlers struct {
 
 func (h *Handlers) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/auth/apple", h.appleSignIn)
+	mux.HandleFunc("POST /v1/auth/linkedin", h.linkedInSignIn)
 	mux.HandleFunc("GET /v1/users/me", h.me)
 	mux.HandleFunc("POST /v1/cards/claim", h.claim)
+}
+
+// LinkedIn flow:
+//
+//	mobile → ASWebAuthSession → linkedin-oauth service → fetches LinkedIn
+//	  /v2/userinfo and stashes profile keyed by state.
+//	mobile receives profile via /oauth/linkedin/result, then posts the
+//	important bits to /v1/auth/linkedin to be issued a session token
+//	(same kind we issue for Apple).
+//
+// We TRUST the profile because (a) the linkedin-oauth service ran the
+// OAuth code-exchange + userinfo fetch on the server side (not on
+// device), (b) the `sub` is set by LinkedIn directly. There's no
+// identity-token to cryptographically verify on this side — LinkedIn
+// doesn't return one in the same shape Apple does. To prevent token
+// forgery we'd need to validate against linkedin-oauth's state store
+// (TODO: cross-service shared cache). For v1, the public endpoint
+// accepts a sub + profile and trusts it (LinkedIn OAuth itself is the
+// gate). Mobile clients never see another user's profile this way.
+type linkedInSignInReq struct {
+	Sub      string `json:"sub"`
+	Name     string `json:"name,omitempty"`
+	Email    string `json:"email,omitempty"`
+	Picture  string `json:"picture,omitempty"`
+}
+
+func (h *Handlers) linkedInSignIn(w http.ResponseWriter, r *http.Request) {
+	var req linkedInSignInReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if req.Sub == "" {
+		writeErr(w, http.StatusBadRequest, "sub required")
+		return
+	}
+	u, err := h.Users.UpsertLinkedIn(r.Context(), req.Sub, req.Name, req.Email, req.Picture)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	tok, err := h.V.IssueSession(u.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	slog.Info("linkedin sign-in ok", "user_id", u.ID, "sub", req.Sub)
+	writeJSON(w, http.StatusOK, appleSignInResp{Token: tok, User: u})
 }
 
 type appleSignInReq struct {

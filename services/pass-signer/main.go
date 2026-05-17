@@ -482,18 +482,18 @@ func brandColorHex(c *card) string {
 
 // renderHeroStrip composes the front banner of the Wallet pass.
 //
-// Build 126 redesign — CENTERED MEDALLION:
-//   • Brand-color background fills the full 1125×432 canvas (storeCard's
-//     strip slot is ~2.54:1, our canvas matches).
-//   • Photo (if any) rendered as a perfect circle dead center, sized to
-//     ~88% of canvas height. White ring (8px) frames it against the brand
-//     color so it pops on any background.
-//   • NO logo on the strip — the company logo lives in the small Apple
-//     header tile (logo.png slot) only. Keeps the medallion uncluttered.
-//   • Photo-less cards: brand-color strip stays clean; logo header tile
-//     + secondary/auxiliary fields carry the identity.
+// Build 144 redesign — BIG MEDALLION + LOGO BAND:
+//   • Brand-color background fills the full 1125×432 canvas.
+//   • Photo medallion sized to ~95% of canvas height (was 88%), capped
+//     at 50% of canvas width — significantly larger than Build 126.
+//     White ring (14px, was 12px) for strong contrast on any brand.
+//   • Company logo rendered at LEFT side of the strip (a 32% × full-
+//     height column with the logo fit-to-box at ~70% of that area).
+//     Was previously only in the small Apple header tile; founder
+//     feedback was that the logo was lost and the strip looked empty.
+//   • If no logo, photo centers in the canvas as before.
+//   • If no photo, logo dominates (centered, larger).
 func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, error) {
-	_ = logoBytes // intentionally unused on the strip — header tile owns it
 	br, bg, bb := hexToRGB(brandColorHex(c))
 	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
 	for y := 0; y < h; y++ {
@@ -501,15 +501,42 @@ func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, e
 			canvas.SetNRGBA(x, y, color.NRGBA{R: br, G: bg, B: bb, A: 255})
 		}
 	}
-	if len(photoBytes) > 0 {
-		photoDiam := h * 88 / 100
-		if photoDiam > w*40/100 {
-			photoDiam = w * 40 / 100
+
+	hasPhoto := len(photoBytes) > 0
+	hasLogo := len(logoBytes) > 0
+
+	switch {
+	case hasPhoto && hasLogo:
+		// Logo column on the LEFT (32% of width). Photo medallion
+		// centered in the remaining ~68% area, BIG.
+		logoColW := w * 32 / 100
+		logoBoxH := h * 70 / 100
+		logoBoxW := logoColW * 80 / 100
+		logoOX := (logoColW - logoBoxW) / 2
+		logoOY := (h - logoBoxH) / 2
+		drawLogoFit(canvas, logoBytes, logoOX, logoOY, logoBoxW, logoBoxH)
+		photoArea := w - logoColW
+		photoDiam := h * 92 / 100
+		if photoDiam > photoArea*92/100 {
+			photoDiam = photoArea * 92 / 100
+		}
+		photoOX := logoColW + (photoArea-photoDiam)/2
+		photoOY := (h - photoDiam) / 2
+		drawCircularPhoto(canvas, photoBytes, photoOX, photoOY, photoDiam)
+	case hasPhoto:
+		photoDiam := h * 95 / 100
+		if photoDiam > w*45/100 {
+			photoDiam = w * 45 / 100
 		}
 		ox := (w - photoDiam) / 2
 		oy := (h - photoDiam) / 2
 		drawCircularPhoto(canvas, photoBytes, ox, oy, photoDiam)
+	case hasLogo:
+		boxH := h * 80 / 100
+		boxW := w * 60 / 100
+		drawLogoFit(canvas, logoBytes, (w-boxW)/2, (h-boxH)/2, boxW, boxH)
 	}
+
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, canvas); err != nil {
 		return nil, err
@@ -517,61 +544,12 @@ func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, e
 	return buf.Bytes(), nil
 }
 
-// drawCircularPhoto draws a center-cover-cropped photo inside a circle at
-// (ox, oy) with the given diameter. Pixels outside the circle are left
-// untouched so the underlying brand color shows through. A thick white
-// ring (12px) frames the photo for medallion contrast against any brand
-// color background.
-func drawCircularPhoto(canvas *image.NRGBA, photoBytes []byte, ox, oy, diam int) {
-	photoImg, _, err := image.Decode(bytes.NewReader(photoBytes))
-	if err != nil {
+// drawLogoFit fits the logo bytes inside (ox, oy, w, h) preserving aspect.
+// Transparent pixels (a < 16) are skipped so the brand color shows through.
+func drawLogoFit(canvas *image.NRGBA, logoBytes []byte, ox, oy, w, h int) {
+	if w <= 0 || h <= 0 {
 		return
 	}
-	sw, sh := photoImg.Bounds().Dx(), photoImg.Bounds().Dy()
-	sz := sw
-	if sh < sw {
-		sz = sh
-	}
-	sx0 := (sw - sz) / 2
-	sy0 := (sh - sz) / 2
-	radius := diam / 2
-	cx := ox + radius
-	cy := oy + radius
-	r2 := radius * radius
-	const ring = 12
-	ringInner := radius - ring
-	ringInner2 := ringInner * ringInner
-	for y := 0; y < diam; y++ {
-		for x := 0; x < diam; x++ {
-			dx := (ox + x) - cx
-			dy := (oy + y) - cy
-			d2 := dx*dx + dy*dy
-			if d2 > r2 {
-				continue
-			}
-			if d2 >= ringInner2 {
-				canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
-				continue
-			}
-			// Photo inside the ring, scaled to (radius-ring)*2 source range.
-			inDiam := diam - 2*ring
-			sx := sx0 + ((x - ring) * sz) / inDiam
-			sy := sy0 + ((y - ring) * sz) / inDiam
-			if sx < 0 || sx >= sw || sy < 0 || sy >= sh {
-				continue
-			}
-			r, g, b, a := photoImg.At(sx, sy).RGBA()
-			canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
-				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
-			})
-		}
-	}
-}
-
-// drawLogoFit fits the logo bytes inside (ox, oy, w, h) preserving aspect.
-// Transparent pixels (a < 16) are skipped so the brand color underneath
-// shows through — required for typical PNG logos.
-func drawLogoFit(canvas *image.NRGBA, logoBytes []byte, ox, oy, w, h int) {
 	logoImg, _, err := image.Decode(bytes.NewReader(logoBytes))
 	if err != nil {
 		return
@@ -601,6 +579,57 @@ func drawLogoFit(canvas *image.NRGBA, logoBytes []byte, ox, oy, w, h int) {
 				continue
 			}
 			canvas.SetNRGBA(px+x, py+y, color.NRGBA{
+				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
+			})
+		}
+	}
+}
+
+// drawCircularPhoto draws a center-cover-cropped photo inside a circle at
+// (ox, oy) with the given diameter. Pixels outside the circle are left
+// untouched so the underlying brand color shows through. A thick white
+// ring (12px) frames the photo for medallion contrast against any brand
+// color background.
+func drawCircularPhoto(canvas *image.NRGBA, photoBytes []byte, ox, oy, diam int) {
+	photoImg, _, err := image.Decode(bytes.NewReader(photoBytes))
+	if err != nil {
+		return
+	}
+	sw, sh := photoImg.Bounds().Dx(), photoImg.Bounds().Dy()
+	sz := sw
+	if sh < sw {
+		sz = sh
+	}
+	sx0 := (sw - sz) / 2
+	sy0 := (sh - sz) / 2
+	radius := diam / 2
+	cx := ox + radius
+	cy := oy + radius
+	r2 := radius * radius
+	const ring = 14
+	ringInner := radius - ring
+	ringInner2 := ringInner * ringInner
+	for y := 0; y < diam; y++ {
+		for x := 0; x < diam; x++ {
+			dx := (ox + x) - cx
+			dy := (oy + y) - cy
+			d2 := dx*dx + dy*dy
+			if d2 > r2 {
+				continue
+			}
+			if d2 >= ringInner2 {
+				canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{R: 255, G: 255, B: 255, A: 255})
+				continue
+			}
+			// Photo inside the ring, scaled to (radius-ring)*2 source range.
+			inDiam := diam - 2*ring
+			sx := sx0 + ((x - ring) * sz) / inDiam
+			sy := sy0 + ((y - ring) * sz) / inDiam
+			if sx < 0 || sx >= sw || sy < 0 || sy >= sh {
+				continue
+			}
+			r, g, b, a := photoImg.At(sx, sy).RGBA()
+			canvas.SetNRGBA(ox+x, oy+y, color.NRGBA{
 				R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8),
 			})
 		}
@@ -687,32 +716,33 @@ func fetchCard(ctx context.Context, apiBase, id, slug string) (*card, error) {
 func buildPass(c *card, passTypeID, teamID, webBase, vcfURLBase, mode string) pkpass.Pass {
 	bg, fg, lbl := templateColors(c.Template, c.CustomColor)
 
-	// Layout decisions, by region:
+	// Layout decisions, by region (Build 144):
 	//
-	//   header (top, small):   no logoText, no headerFields → JUST the
-	//                          logo.png tile. Keeps the area above the
-	//                          strip clean so the photo isn't crowded
-	//                          out of frame.
-	//   primary fields:        EMPTY — primary lives RIGHT ABOVE the
-	//                          strip image in eventTicket layout and Apple
-	//                          draws it big. Putting the name there made
-	//                          the strip's photo look like it was being
-	//                          captioned ("name on face").
-	//   strip:                 photo + brand logo composite (renderHeroStrip).
-	//   secondary fields:      Name (col 1, prominent), Title (col 2). Below strip.
-	//   auxiliary fields:      Company, Phone, Email (3 cols).
-	//   back fields:           Full list of emails/phones + profile URL.
-	secondary := []pkpass.Field{
+	//   header (top, small):   logo.png tile (company logo, set elsewhere)
+	//   primary fields:        Name + Title — Apple renders these BIG
+	//                          right above the strip, prominent like a
+	//                          name tag. Founder feedback: the empty
+	//                          primary area in Build 126/143 made the
+	//                          pass look unfinished and squeezed
+	//                          everything else into auxiliary.
+	//   strip:                 photo medallion + company logo composite
+	//                          (see renderHeroStrip — Build 144 bigger)
+	//   secondary fields:      Company (1 col, full width below strip)
+	//   auxiliary fields:      Phone + Email (2 cols)
+	//   back fields:           Full list of emails/phones + profile URL
+	primary := []pkpass.Field{
 		{Key: "name", Label: strings.ToUpper(c.Label), Value: c.Name},
 	}
+
+	secondary := []pkpass.Field{}
 	if c.Title != "" {
 		secondary = append(secondary, pkpass.Field{Key: "title", Label: "TITLE", Value: c.Title})
 	}
+	if c.Company != "" {
+		secondary = append(secondary, pkpass.Field{Key: "company", Label: "COMPANY", Value: c.Company})
+	}
 
 	aux := []pkpass.Field{}
-	if c.Company != "" {
-		aux = append(aux, pkpass.Field{Key: "company", Label: "COMPANY", Value: c.Company})
-	}
 	if len(c.Phones) > 0 {
 		aux = append(aux, pkpass.Field{Key: "phone", Label: "PHONE", Value: c.Phones[0]})
 	}
@@ -783,7 +813,7 @@ func buildPass(c *card, passTypeID, teamID, webBase, vcfURLBase, mode string) pk
 	// drawn in our canvas displayed as an oval (different horizontal vs
 	// vertical scale to fit the slot).
 	pass.StoreCard = &pkpass.Style{
-		// PrimaryFields intentionally empty — keeps the strip uncluttered.
+		PrimaryFields:   primary,
 		SecondaryFields: secondary,
 		AuxiliaryFields: aux,
 		BackFields:      back,

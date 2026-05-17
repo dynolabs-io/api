@@ -52,6 +52,8 @@ var (
 	fontBold    *opentype.Font
 )
 
+var transparent1x1PNG []byte
+
 func init() {
 	var err error
 	if fontRegular, err = opentype.Parse(fontRegularTTF); err != nil {
@@ -60,6 +62,16 @@ func init() {
 	if fontBold, err = opentype.Parse(fontBoldTTF); err != nil {
 		panic("parse bold font: " + err.Error())
 	}
+	// 1×1 fully-transparent PNG — used as logo.png to suppress Apple's
+	// header logo tile so we don't double-print the company brand
+	// (the strip itself carries the small top-left logo).
+	img := image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	img.SetNRGBA(0, 0, color.NRGBA{0, 0, 0, 0})
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		panic("encode transparent1x1: " + err.Error())
+	}
+	transparent1x1PNG = buf.Bytes()
 }
 
 // renderQRPNG produces a QR code PNG sized to fill the canvas as much
@@ -270,28 +282,27 @@ func main() {
 		}
 
 		// Apple's "logo" header slot (top-left of the pass) is a small
-		// rectangular chip. The "icon" is a square (29pt) shown wherever
-		// the pass appears in lists / lock-screen.
+		// rectangular chip rendered ABOVE the strip. The "icon" is a
+		// square (29pt) shown wherever the pass appears in lists /
+		// lock-screen.
 		//
-		// Build 126: company brand logo lives HERE (not on the strip). If
-		// the card has a brand logo, fit it into the header. Falls back to
-		// a brand-colored tile so the pass always renders.
+		// Build 147: logo.png is now a TRANSPARENT 1×1 placeholder so
+		// Apple's header tile renders nothing — the strip carries the
+		// only company-logo glyph (small, top-left of the strip), which
+		// is what the founder standardized. icon.png keeps the brand
+		// logo so lock-screen/list rows still identify the pass.
 		iconAsset := iconPNG(87, c.Template, c.CustomColor)
-		logoAsset := iconPNG(160, c.Template, c.CustomColor)
 		if len(brandLogoBytes) > 0 {
 			if ic, err := fitLogoToTile(brandLogoBytes, 87, 87, c); err == nil {
 				iconAsset = ic
-			}
-			if lg, err := fitLogoToTile(brandLogoBytes, 160, 50, c); err == nil {
-				logoAsset = lg
 			}
 		}
 		assets := map[string][]byte{
 			"icon.png":    iconAsset,
 			"icon@2x.png": iconAsset,
 			"icon@3x.png": iconAsset,
-			"logo.png":    logoAsset,
-			"logo@2x.png": logoAsset,
+			"logo.png":    transparent1x1PNG,
+			"logo@2x.png": transparent1x1PNG,
 		}
 
 		// The strip is the ONE composite image. It always packs both the
@@ -507,17 +518,19 @@ func brandColorHex(c *card) string {
 
 // renderHeroStrip composes the front banner of the Wallet pass.
 //
-// Build 146 redesign — FULL CARD ON STRIP (mirrors in-app card view):
+// Build 147 layout (founder-picked option 2 + blank-header):
 //   • Brand-color background fills the full 1125×432 canvas.
-//   • Right 45%: photo medallion (or logo if no photo).
-//   • Left 55%: stacked text — NAME (big bold), TITLE, COMPANY —
-//     plus optional company logo small in the top-left corner. This
-//     mirrors what the user sees in the app, so the Wallet pass
-//     no longer looks like a fragmented set of cramped Apple fields.
-//   • Foreground text color picked by luma for readability on any brand.
+//   • Small company logo glyph top-left of the strip (the ONE place
+//     the brand logo appears now — Apple's header tile is blanked
+//     via a 1×1 transparent logo.png).
+//   • Photo medallion CENTERED horizontally, sits in upper area.
+//   • Below the medallion, 3 CENTERED lines:
+//       NAME    (big bold)
+//       Title   (medium)
+//       Company (medium)
+//   • Foreground text color picked by luma for readability.
 //   • Apple's auxiliaryFields still carry Phone/Email below the strip
-//     (those need to stay tappable for tel:/mailto: — we can't make
-//     strip-rendered text tappable in Wallet).
+//     (those need to stay tappable for tel:/mailto:).
 func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, error) {
 	br, bg, bb := hexToRGB(brandColorHex(c))
 	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
@@ -532,48 +545,45 @@ func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, e
 	fg := readableFG(br, bg, bb)
 	fgSoft := softFG(br, bg, bb)
 
-	// Right column: photo medallion (or logo if no photo).
-	rightW := w * 45 / 100
-	rightX := w - rightW
-	switch {
-	case hasPhoto:
-		photoDiam := h * 92 / 100
-		if photoDiam > rightW*92/100 {
-			photoDiam = rightW * 92 / 100
-		}
-		ox := rightX + (rightW-photoDiam)/2
-		oy := (h - photoDiam) / 2
-		drawCircularPhoto(canvas, photoBytes, ox, oy, photoDiam)
-	case hasLogo:
-		boxH := h * 80 / 100
-		boxW := rightW * 80 / 100
-		drawLogoFit(canvas, logoBytes, rightX+(rightW-boxW)/2, (h-boxH)/2, boxW, boxH)
+	// Photo medallion: centered horizontally, in upper area so the
+	// text block fits below with breathing room. Diameter capped so
+	// 3 text lines below have ~150px height.
+	photoDiam := h * 55 / 100 // ~238 on a 432 canvas
+	if photoDiam > w*22/100 {
+		photoDiam = w * 22 / 100
+	}
+	photoTop := h * 6 / 100 // small top inset
+	photoX := (w - photoDiam) / 2
+	if hasPhoto {
+		drawCircularPhoto(canvas, photoBytes, photoX, photoTop, photoDiam)
+	} else if hasLogo && !hasLogo { // (unused branch — guarded fallback removed)
+		drawLogoFit(canvas, logoBytes, photoX, photoTop, photoDiam, photoDiam)
 	}
 
-	// Left column: text block — name (big bold), title (medium), company
-	// (medium with logo glyph if available). Padded for breathing room.
-	textX := w * 4 / 100
-	textW := rightX - textX*2
-	// Top-left small logo glyph when both photo+logo (logo doesn't fit
-	// on the right column then; show as a small badge above the name).
-	cursorY := h * 12 / 100
-	if hasPhoto && hasLogo {
-		logoH := h * 18 / 100
-		logoW := textW * 35 / 100
-		drawLogoFit(canvas, logoBytes, textX, cursorY-logoH/2, logoW, logoH)
-		cursorY += logoH + 10
+	// Small company logo top-left of strip — same standardization as
+	// the in-app card. Sized so it doesn't compete with the medallion.
+	if hasLogo {
+		logoBoxH := h * 14 / 100  // ~60 on 432
+		logoBoxW := w * 11 / 100  // ~124 on 1125
+		logoInset := h * 4 / 100  // ~17 from top & left (equal distance)
+		drawLogoFit(canvas, logoBytes, logoInset, logoInset, logoBoxW, logoBoxH)
 	}
+
+	// 3 centered text lines BELOW the medallion.
+	cursorY := photoTop + photoDiam + h*4/100 // gap after photo
+	textW := w * 90 / 100
+	textX := (w - textW) / 2
 
 	if name := strings.TrimSpace(c.Name); name != "" {
-		drawText(canvas, name, fontBold, 60, textX, cursorY, textW, fg)
-		cursorY += 76
+		drawTextCentered(canvas, name, fontBold, 52, textX, cursorY, textW, fg)
+		cursorY += 58
 	}
 	if title := strings.TrimSpace(c.Title); title != "" {
-		drawText(canvas, title, fontRegular, 38, textX, cursorY, textW, fgSoft)
-		cursorY += 50
+		drawTextCentered(canvas, title, fontRegular, 32, textX, cursorY, textW, fgSoft)
+		cursorY += 38
 	}
 	if company := strings.TrimSpace(c.Company); company != "" {
-		drawText(canvas, company, fontRegular, 38, textX, cursorY, textW, fgSoft)
+		drawTextCentered(canvas, company, fontRegular, 32, textX, cursorY, textW, fgSoft)
 	}
 
 	var buf bytes.Buffer
@@ -583,10 +593,9 @@ func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, e
 	return buf.Bytes(), nil
 }
 
-// drawText renders text on canvas using the given font + pixel-height
-// size at the baseline position (x, y+ascent). Truncated with an
-// ellipsis when wider than maxW.
-func drawText(canvas *image.NRGBA, s string, ttf *opentype.Font, size float64, x, y, maxW int, fg color.NRGBA) {
+// drawTextCentered renders text horizontally centered within the
+// rectangle (x, y, x+w). Truncates with an ellipsis when too wide.
+func drawTextCentered(canvas *image.NRGBA, s string, ttf *opentype.Font, size float64, x, y, w int, fg color.NRGBA) {
 	face, err := opentype.NewFace(ttf, &opentype.FaceOptions{
 		Size:    size,
 		DPI:     72,
@@ -597,24 +606,23 @@ func drawText(canvas *image.NRGBA, s string, ttf *opentype.Font, size float64, x
 	}
 	defer face.Close()
 
-	// Truncate with ellipsis if needed.
-	display := s
 	d := &font.Drawer{
 		Dst:  canvas,
 		Src:  image.NewUniform(fg),
 		Face: face,
 	}
-	if d.MeasureString(display).Round() > maxW {
-		for len(display) > 1 && d.MeasureString(display+"…").Round() > maxW {
+	display := s
+	if d.MeasureString(display).Round() > w {
+		for len(display) > 1 && d.MeasureString(display+"…").Round() > w {
 			display = display[:len(display)-1]
 		}
 		display += "…"
 	}
-	// Baseline = y + ascent. font.HintingFull gives crisp glyphs at
-	// these large sizes.
+	textW := d.MeasureString(display).Round()
+	startX := x + (w-textW)/2
 	metrics := face.Metrics()
 	baseline := y + metrics.Ascent.Round()
-	d.Dot = fixed.P(x, baseline)
+	d.Dot = fixed.P(startX, baseline)
 	d.DrawString(display)
 }
 

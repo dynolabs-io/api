@@ -208,6 +208,12 @@ func (h *Handlers) claim(w http.ResponseWriter, r *http.Request) {
 	if all == nil {
 		all = []cards.Card{}
 	}
+	if claimed == nil {
+		claimed = []string{}
+	}
+	if resolved == nil {
+		resolved = []*cards.Card{}
+	}
 	writeJSON(w, http.StatusOK, claimResp{
 		Claimed:   claimed,
 		Resolved:  resolved,

@@ -507,22 +507,17 @@ func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, e
 
 	switch {
 	case hasPhoto && hasLogo:
-		// Logo column on the LEFT (32% of width). Photo medallion
-		// centered in the remaining ~68% area, BIG.
-		logoColW := w * 32 / 100
-		logoBoxH := h * 70 / 100
-		logoBoxW := logoColW * 80 / 100
-		logoOX := (logoColW - logoBoxW) / 2
-		logoOY := (h - logoBoxH) / 2
-		drawLogoFit(canvas, logoBytes, logoOX, logoOY, logoBoxW, logoBoxH)
-		photoArea := w - logoColW
-		photoDiam := h * 92 / 100
-		if photoDiam > photoArea*92/100 {
-			photoDiam = photoArea * 92 / 100
+		// Build 145: do NOT paint the logo on the strip when a photo is
+		// present — Apple already renders logo.png in the header tile.
+		// Build 144 painted it on the strip too, which the founder read
+		// as a duplicate logo. Photo medallion centered, fills canvas.
+		photoDiam := h * 95 / 100
+		if photoDiam > w*48/100 {
+			photoDiam = w * 48 / 100
 		}
-		photoOX := logoColW + (photoArea-photoDiam)/2
-		photoOY := (h - photoDiam) / 2
-		drawCircularPhoto(canvas, photoBytes, photoOX, photoOY, photoDiam)
+		ox := (w - photoDiam) / 2
+		oy := (h - photoDiam) / 2
+		drawCircularPhoto(canvas, photoBytes, ox, oy, photoDiam)
 	case hasPhoto:
 		photoDiam := h * 95 / 100
 		if photoDiam > w*45/100 {
@@ -716,30 +711,27 @@ func fetchCard(ctx context.Context, apiBase, id, slug string) (*card, error) {
 func buildPass(c *card, passTypeID, teamID, webBase, vcfURLBase, mode string) pkpass.Pass {
 	bg, fg, lbl := templateColors(c.Template, c.CustomColor)
 
-	// Layout decisions, by region (Build 144):
+	// Layout decisions, by region (Build 145):
 	//
-	//   header (top, small):   logo.png tile (company logo, set elsewhere)
-	//   primary fields:        Name + Title — Apple renders these BIG
-	//                          right above the strip, prominent like a
-	//                          name tag. Founder feedback: the empty
-	//                          primary area in Build 126/143 made the
-	//                          pass look unfinished and squeezed
-	//                          everything else into auxiliary.
-	//   strip:                 photo medallion + company logo composite
-	//                          (see renderHeroStrip — Build 144 bigger)
-	//   secondary fields:      Company (1 col, full width below strip)
-	//   auxiliary fields:      Phone + Email (2 cols)
-	//   back fields:           Full list of emails/phones + profile URL
-	primary := []pkpass.Field{
-		{Key: "name", Label: strings.ToUpper(c.Label), Value: c.Name},
-	}
+	//   header (top, small):   logo.png tile (the ONE place the brand
+	//                          logo appears on the front)
+	//   primary fields:        EMPTY — Apple overlays primary fields ON
+	//                          the strip image in storeCard. Build 144
+	//                          put Name there → text rendered on top of
+	//                          the photo medallion. Founder rejected it.
+	//   strip:                 photo medallion only (no on-strip logo —
+	//                          would have looked like the logo appeared
+	//                          twice when combined with the header tile)
+	//   secondary fields:      NAME (1 col, full width below strip)
+	//   auxiliary fields:      Phone + Email (2 cols) OR Title + Company
+	//                          if no contact fields; keep to 2 fields per
+	//                          row so they don't squeeze
+	//   back fields:           Title + Company + full phone/email lists
+	//                          + profile URL
+	primary := []pkpass.Field{}
 
-	secondary := []pkpass.Field{}
-	if c.Title != "" {
-		secondary = append(secondary, pkpass.Field{Key: "title", Label: "TITLE", Value: c.Title})
-	}
-	if c.Company != "" {
-		secondary = append(secondary, pkpass.Field{Key: "company", Label: "COMPANY", Value: c.Company})
+	secondary := []pkpass.Field{
+		{Key: "name", Label: strings.ToUpper(c.Label), Value: c.Name},
 	}
 
 	aux := []pkpass.Field{}
@@ -751,6 +743,12 @@ func buildPass(c *card, passTypeID, teamID, webBase, vcfURLBase, mode string) pk
 	}
 
 	back := []pkpass.Field{}
+	if c.Title != "" {
+		back = append(back, pkpass.Field{Key: "title", Label: "Title", Value: c.Title})
+	}
+	if c.Company != "" {
+		back = append(back, pkpass.Field{Key: "company", Label: "Company", Value: c.Company})
+	}
 	for i, e := range c.Emails {
 		back = append(back, pkpass.Field{Key: fmt.Sprintf("email%d", i), Label: "Email", Value: e})
 	}

@@ -545,45 +545,45 @@ func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, e
 	fg := readableFG(br, bg, bb)
 	fgSoft := softFG(br, bg, bb)
 
-	// Photo medallion: centered horizontally, in upper area so the
-	// text block fits below with breathing room. Diameter capped so
-	// 3 text lines below have ~150px height.
-	photoDiam := h * 55 / 100 // ~238 on a 432 canvas
-	if photoDiam > w*22/100 {
-		photoDiam = w * 22 / 100
+	// Photo medallion: bigger (founder Build 167 feedback — was 238,
+	// now 270 = +13%). Centered horizontally, top-aligned with very
+	// small inset so it sits high and the 3 text lines fit below.
+	photoDiam := h * 63 / 100 // ~272 on 432 canvas
+	if photoDiam > w*28/100 {
+		photoDiam = w * 28 / 100
 	}
-	photoTop := h * 6 / 100 // small top inset
+	photoTop := h * 1 / 100 // ~4 — close to top edge
 	photoX := (w - photoDiam) / 2
 	if hasPhoto {
 		drawCircularPhoto(canvas, photoBytes, photoX, photoTop, photoDiam)
-	} else if hasLogo && !hasLogo { // (unused branch — guarded fallback removed)
-		drawLogoFit(canvas, logoBytes, photoX, photoTop, photoDiam, photoDiam)
 	}
 
-	// Small company logo top-left of strip — same standardization as
-	// the in-app card. Sized so it doesn't compete with the medallion.
+	// Small company logo top-left — moved HIGHER (founder said it had
+	// drifted down) and slightly larger so it's not lost.
 	if hasLogo {
-		logoBoxH := h * 14 / 100  // ~60 on 432
-		logoBoxW := w * 11 / 100  // ~124 on 1125
-		logoInset := h * 4 / 100  // ~17 from top & left (equal distance)
-		drawLogoFit(canvas, logoBytes, logoInset, logoInset, logoBoxW, logoBoxH)
+		logoBoxH := h * 16 / 100 // ~70 on 432 (was ~60)
+		logoBoxW := w * 13 / 100 // ~146 on 1125 (was ~124)
+		logoInsetY := h * 1 / 100 // ~4 — tight to top edge
+		logoInsetX := w * 1 / 100 // ~12 — tight to left edge
+		drawLogoFit(canvas, logoBytes, logoInsetX, logoInsetY, logoBoxW, logoBoxH)
 	}
 
-	// 3 centered text lines BELOW the medallion.
-	cursorY := photoTop + photoDiam + h*4/100 // gap after photo
-	textW := w * 90 / 100
+	// 3 centered text lines BELOW the medallion — BIGGER fonts so they
+	// visibly dominate Apple's auxiliary phone/email row underneath.
+	cursorY := photoTop + photoDiam + h*2/100 // small gap after photo
+	textW := w * 92 / 100
 	textX := (w - textW) / 2
 
 	if name := strings.TrimSpace(c.Name); name != "" {
-		drawTextCentered(canvas, name, fontBold, 52, textX, cursorY, textW, fg)
-		cursorY += 58
+		drawTextCentered(canvas, name, fontBold, 58, textX, cursorY, textW, fg)
+		cursorY += 66
 	}
 	if title := strings.TrimSpace(c.Title); title != "" {
-		drawTextCentered(canvas, title, fontRegular, 32, textX, cursorY, textW, fgSoft)
-		cursorY += 38
+		drawTextCentered(canvas, title, fontRegular, 36, textX, cursorY, textW, fgSoft)
+		cursorY += 42
 	}
 	if company := strings.TrimSpace(c.Company); company != "" {
-		drawTextCentered(canvas, company, fontRegular, 32, textX, cursorY, textW, fgSoft)
+		drawTextCentered(canvas, company, fontRegular, 36, textX, cursorY, textW, fgSoft)
 	}
 
 	var buf bytes.Buffer

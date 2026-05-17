@@ -14,6 +14,7 @@ package main
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -35,7 +36,31 @@ import (
 	"github.com/dynolabs-io/api/services/pass-signer/pkpass"
 	"github.com/dynolabs-io/api/shared/health"
 	qrcode "github.com/skip2/go-qrcode"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/opentype"
+	"golang.org/x/image/math/fixed"
 )
+
+//go:embed assets/DejaVuSans.ttf
+var fontRegularTTF []byte
+
+//go:embed assets/DejaVuSans-Bold.ttf
+var fontBoldTTF []byte
+
+var (
+	fontRegular *opentype.Font
+	fontBold    *opentype.Font
+)
+
+func init() {
+	var err error
+	if fontRegular, err = opentype.Parse(fontRegularTTF); err != nil {
+		panic("parse regular font: " + err.Error())
+	}
+	if fontBold, err = opentype.Parse(fontBoldTTF); err != nil {
+		panic("parse bold font: " + err.Error())
+	}
+}
 
 // renderQRPNG produces a QR code PNG sized to fill the canvas as much
 // as possible. The QR is square; for non-square canvases it's centered
@@ -482,17 +507,17 @@ func brandColorHex(c *card) string {
 
 // renderHeroStrip composes the front banner of the Wallet pass.
 //
-// Build 144 redesign — BIG MEDALLION + LOGO BAND:
+// Build 146 redesign — FULL CARD ON STRIP (mirrors in-app card view):
 //   • Brand-color background fills the full 1125×432 canvas.
-//   • Photo medallion sized to ~95% of canvas height (was 88%), capped
-//     at 50% of canvas width — significantly larger than Build 126.
-//     White ring (14px, was 12px) for strong contrast on any brand.
-//   • Company logo rendered at LEFT side of the strip (a 32% × full-
-//     height column with the logo fit-to-box at ~70% of that area).
-//     Was previously only in the small Apple header tile; founder
-//     feedback was that the logo was lost and the strip looked empty.
-//   • If no logo, photo centers in the canvas as before.
-//   • If no photo, logo dominates (centered, larger).
+//   • Right 45%: photo medallion (or logo if no photo).
+//   • Left 55%: stacked text — NAME (big bold), TITLE, COMPANY —
+//     plus optional company logo small in the top-left corner. This
+//     mirrors what the user sees in the app, so the Wallet pass
+//     no longer looks like a fragmented set of cramped Apple fields.
+//   • Foreground text color picked by luma for readability on any brand.
+//   • Apple's auxiliaryFields still carry Phone/Email below the strip
+//     (those need to stay tappable for tel:/mailto: — we can't make
+//     strip-rendered text tappable in Wallet).
 func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, error) {
 	br, bg, bb := hexToRGB(brandColorHex(c))
 	canvas := image.NewNRGBA(image.Rect(0, 0, w, h))
@@ -504,32 +529,51 @@ func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, e
 
 	hasPhoto := len(photoBytes) > 0
 	hasLogo := len(logoBytes) > 0
+	fg := readableFG(br, bg, bb)
+	fgSoft := softFG(br, bg, bb)
 
+	// Right column: photo medallion (or logo if no photo).
+	rightW := w * 45 / 100
+	rightX := w - rightW
 	switch {
-	case hasPhoto && hasLogo:
-		// Build 145: do NOT paint the logo on the strip when a photo is
-		// present — Apple already renders logo.png in the header tile.
-		// Build 144 painted it on the strip too, which the founder read
-		// as a duplicate logo. Photo medallion centered, fills canvas.
-		photoDiam := h * 95 / 100
-		if photoDiam > w*48/100 {
-			photoDiam = w * 48 / 100
-		}
-		ox := (w - photoDiam) / 2
-		oy := (h - photoDiam) / 2
-		drawCircularPhoto(canvas, photoBytes, ox, oy, photoDiam)
 	case hasPhoto:
-		photoDiam := h * 95 / 100
-		if photoDiam > w*45/100 {
-			photoDiam = w * 45 / 100
+		photoDiam := h * 92 / 100
+		if photoDiam > rightW*92/100 {
+			photoDiam = rightW * 92 / 100
 		}
-		ox := (w - photoDiam) / 2
+		ox := rightX + (rightW-photoDiam)/2
 		oy := (h - photoDiam) / 2
 		drawCircularPhoto(canvas, photoBytes, ox, oy, photoDiam)
 	case hasLogo:
 		boxH := h * 80 / 100
-		boxW := w * 60 / 100
-		drawLogoFit(canvas, logoBytes, (w-boxW)/2, (h-boxH)/2, boxW, boxH)
+		boxW := rightW * 80 / 100
+		drawLogoFit(canvas, logoBytes, rightX+(rightW-boxW)/2, (h-boxH)/2, boxW, boxH)
+	}
+
+	// Left column: text block — name (big bold), title (medium), company
+	// (medium with logo glyph if available). Padded for breathing room.
+	textX := w * 4 / 100
+	textW := rightX - textX*2
+	// Top-left small logo glyph when both photo+logo (logo doesn't fit
+	// on the right column then; show as a small badge above the name).
+	cursorY := h * 12 / 100
+	if hasPhoto && hasLogo {
+		logoH := h * 18 / 100
+		logoW := textW * 35 / 100
+		drawLogoFit(canvas, logoBytes, textX, cursorY-logoH/2, logoW, logoH)
+		cursorY += logoH + 10
+	}
+
+	if name := strings.TrimSpace(c.Name); name != "" {
+		drawText(canvas, name, fontBold, 60, textX, cursorY, textW, fg)
+		cursorY += 76
+	}
+	if title := strings.TrimSpace(c.Title); title != "" {
+		drawText(canvas, title, fontRegular, 38, textX, cursorY, textW, fgSoft)
+		cursorY += 50
+	}
+	if company := strings.TrimSpace(c.Company); company != "" {
+		drawText(canvas, company, fontRegular, 38, textX, cursorY, textW, fgSoft)
 	}
 
 	var buf bytes.Buffer
@@ -537,6 +581,62 @@ func renderHeroStrip(c *card, photoBytes, logoBytes []byte, w, h int) ([]byte, e
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// drawText renders text on canvas using the given font + pixel-height
+// size at the baseline position (x, y+ascent). Truncated with an
+// ellipsis when wider than maxW.
+func drawText(canvas *image.NRGBA, s string, ttf *opentype.Font, size float64, x, y, maxW int, fg color.NRGBA) {
+	face, err := opentype.NewFace(ttf, &opentype.FaceOptions{
+		Size:    size,
+		DPI:     72,
+		Hinting: font.HintingFull,
+	})
+	if err != nil {
+		return
+	}
+	defer face.Close()
+
+	// Truncate with ellipsis if needed.
+	display := s
+	d := &font.Drawer{
+		Dst:  canvas,
+		Src:  image.NewUniform(fg),
+		Face: face,
+	}
+	if d.MeasureString(display).Round() > maxW {
+		for len(display) > 1 && d.MeasureString(display+"…").Round() > maxW {
+			display = display[:len(display)-1]
+		}
+		display += "…"
+	}
+	// Baseline = y + ascent. font.HintingFull gives crisp glyphs at
+	// these large sizes.
+	metrics := face.Metrics()
+	baseline := y + metrics.Ascent.Round()
+	d.Dot = fixed.P(x, baseline)
+	d.DrawString(display)
+}
+
+// readableFG picks black or white text for the given brand color
+// using Rec.709 luma. Matches the mobile app's isLight() function so
+// strip text reads consistently with what the user designed in-app.
+func readableFG(r, g, b uint8) color.NRGBA {
+	y := 0.2126*float64(r) + 0.7152*float64(g) + 0.0722*float64(b)
+	if y > 160 {
+		return color.NRGBA{R: 0x0B, G: 0x0B, B: 0x0F, A: 0xFF}
+	}
+	return color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}
+}
+
+// softFG = readableFG dimmed to ~75% — for title/company secondary
+// text below the main name.
+func softFG(r, g, b uint8) color.NRGBA {
+	fg := readableFG(r, g, b)
+	if fg.R == 0xFF {
+		return color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 0xCC}
+	}
+	return color.NRGBA{R: 0x0B, G: 0x0B, B: 0x0F, A: 0xB3}
 }
 
 // drawLogoFit fits the logo bytes inside (ox, oy, w, h) preserving aspect.
@@ -711,28 +811,27 @@ func fetchCard(ctx context.Context, apiBase, id, slug string) (*card, error) {
 func buildPass(c *card, passTypeID, teamID, webBase, vcfURLBase, mode string) pkpass.Pass {
 	bg, fg, lbl := templateColors(c.Template, c.CustomColor)
 
-	// Layout decisions, by region (Build 145):
+	// Layout decisions, by region (Build 146):
 	//
 	//   header (top, small):   logo.png tile (the ONE place the brand
 	//                          logo appears on the front)
 	//   primary fields:        EMPTY — Apple overlays primary fields ON
-	//                          the strip image in storeCard. Build 144
-	//                          put Name there → text rendered on top of
-	//                          the photo medallion. Founder rejected it.
-	//   strip:                 photo medallion only (no on-strip logo —
-	//                          would have looked like the logo appeared
-	//                          twice when combined with the header tile)
-	//   secondary fields:      NAME (1 col, full width below strip)
-	//   auxiliary fields:      Phone + Email (2 cols) OR Title + Company
-	//                          if no contact fields; keep to 2 fields per
-	//                          row so they don't squeeze
+	//                          the strip image in storeCard. We render
+	//                          our own text on the strip; putting fields
+	//                          here would double-print on top.
+	//   strip:                 FULL CARD VIEW (Build 146 — renderHeroStrip
+	//                          draws Name + Title + Company as text on
+	//                          the left, photo medallion on the right —
+	//                          mirrors the in-app card layout).
+	//   secondary fields:      EMPTY (name/title/company are on the strip)
+	//   auxiliary fields:      Phone + Email (kept as Apple fields so the
+	//                          values are tappable for tel:/mailto: —
+	//                          strip-rendered text isn't tappable).
 	//   back fields:           Title + Company + full phone/email lists
-	//                          + profile URL
+	//                          + profile URL (always-on copy for users
+	//                          who flip the pass over).
 	primary := []pkpass.Field{}
-
-	secondary := []pkpass.Field{
-		{Key: "name", Label: strings.ToUpper(c.Label), Value: c.Name},
-	}
+	secondary := []pkpass.Field{}
 
 	aux := []pkpass.Field{}
 	if len(c.Phones) > 0 {

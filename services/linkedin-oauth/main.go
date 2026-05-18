@@ -275,6 +275,22 @@ func exchangeAndFetch(ctx context.Context, clientID, clientSecret, callbackURL, 
 	if err := json.Unmarshal(pbody, &p); err != nil {
 		return nil, fmt.Errorf("userinfo decode: %w", err)
 	}
+	// Field-presence logging (no PII) so we can diagnose missing-email
+	// reports. Also captures the raw key list LinkedIn returned in case
+	// the field name has drifted.
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(pbody, &raw)
+	keys := make([]string, 0, len(raw))
+	for k := range raw {
+		keys = append(keys, k)
+	}
+	slog.Info("linkedin userinfo decoded",
+		"hasSub", p.Sub != "",
+		"hasName", p.Name != "",
+		"hasEmail", p.Email != "",
+		"hasPicture", p.Picture != "",
+		"rawKeys", keys,
+	)
 	return &p, nil
 }
 

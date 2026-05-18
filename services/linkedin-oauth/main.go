@@ -203,6 +203,13 @@ func main() {
 			http.Error(w, `{"error":"not ready or already claimed"}`, http.StatusNotFound)
 			return
 		}
+		// Field-presence logging just before emission to client.
+		slog.Info("linkedin result emitted to client",
+			"hasSub", profile.Sub != "",
+			"hasName", profile.Name != "",
+			"hasEmail", profile.Email != "",
+			"hasPicture", profile.Picture != "",
+		)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(profile)
 	})

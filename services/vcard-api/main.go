@@ -101,7 +101,15 @@ func main() {
 		// LinkedIn OIDC leaves blank after sign-in. Graceful-skip
 		// when APOLLO_API_KEY is unset (returns empty fields).
 		apolloClient := enrich.NewClient(getenv("APOLLO_API_KEY", ""))
-		(&enrich.Handlers{Client: apolloClient, AuthVerify: verifier.UserIDFromBearer}).Mount(mux)
+		// LinkedIn vanity-page enrichment via the iogrid residential
+		// proxy (SOCKS5+TLS). Graceful-skip when any of
+		// IOGRID_API_KEY / IOGRID_WORKSPACE / IOGRID_PROXY_URL is unset.
+		linkedInClient := enrich.LinkedInFromEnv()
+		(&enrich.Handlers{
+			Client:     apolloClient,
+			LinkedIn:   linkedInClient,
+			AuthVerify: verifier.UserIDFromBearer,
+		}).Mount(mux)
 		slog.Info("postgres + cards + auth + scans + leads + wallet + enrich mounted", "bundle", bundleID)
 	} else {
 		slog.Warn("DATABASE_URL not set — running without persistence")

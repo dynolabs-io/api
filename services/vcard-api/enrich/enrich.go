@@ -152,18 +152,26 @@ func (c *Client) Enrich(ctx context.Context, email string) (Result, error) {
 	return out, nil
 }
 
-// Handlers wires Enrich() into the http.ServeMux.
+// Handlers wires the email + LinkedIn enrichment endpoints into the
+// http.ServeMux. Either field may be a no-op client (empty config) —
+// the endpoints still respond 200 with zero Result.
 type Handlers struct {
 	Client     *Client
+	LinkedIn   *LinkedInClient
 	AuthVerify func(r *http.Request) string // returns "" if unauthenticated
 }
 
 func (h *Handlers) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/enrich/email", h.enrichEmail)
+	mux.HandleFunc("POST /v1/enrich/linkedin", h.enrichLinkedIn)
 }
 
 type enrichReq struct {
 	Email string `json:"email"`
+}
+
+type enrichLinkedInReq struct {
+	Vanity string `json:"vanity"`
 }
 
 func (h *Handlers) enrichEmail(w http.ResponseWriter, r *http.Request) {
@@ -183,6 +191,24 @@ func (h *Handlers) enrichEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, _ := h.Client.Enrich(r.Context(), req.Email)
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (h *Handlers) enrichLinkedIn(w http.ResponseWriter, r *http.Request) {
+	if h.AuthVerify != nil && h.AuthVerify(r) == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "auth required"})
+		return
+	}
+	var req enrichLinkedInReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	if strings.TrimSpace(req.Vanity) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "vanity required"})
+		return
+	}
+	out, _ := h.LinkedIn.EnrichByVanity(r.Context(), req.Vanity)
 	writeJSON(w, http.StatusOK, out)
 }
 
